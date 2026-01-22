@@ -10,276 +10,227 @@ from PIL import Image
 import json
 
 # ==========================================
-# 設定：ここに先生の鍵を埋め込みました
+# 設定：APIキー (埋め込み済み)
 # ==========================================
 API_KEY = "AIzaSyATM7vIfyhj6vKsZga3fydYLHvAMRVNdzg"
 
 # ==========================================
-# 1. AI読み取りエンジン (Gemini 1.5 Flash)
+# 1. AI読み取りエンジン (高速化・即時JSON)
 # ==========================================
 def analyze_image_with_gemini(image_bytes):
-    """Geminiを使って画像を解析し、JSONデータを返す"""
-    # 埋め込んだキーを使用
     genai.configure(api_key=API_KEY)
-    
-    # 高速・軽量なFlashモデルを使用
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel(
+        'gemini-1.5-flash',
+        generation_config={"response_mime_type": "application/json"}
+    )
     
     try:
         img = Image.open(io.BytesIO(image_bytes))
     except:
-        return "画像の読み込みに失敗しました"
+        return None
     
     prompt = """
-    あなたは学校の先生の助手です。アップロードされた持久走の記録用紙（手書き）を読み取り、以下の情報を抽出してください。
-    
-    【必須抽出項目】
-    1. 名前 (name): 読み取れなければ "不明"
-    2. 性別 (gender): "男子" または "女子" (わからなければ男子)
-    3. 距離 (distances): 完走した距離(m)のリスト (例: [3000, 3100])。複数回ある場合は全て。
-    4. ラップタイム (laps): 1周ごとのタイム(秒)のリスト (例: [60, 62, 65])。
-       - 分・秒で書かれている場合(例 1'05)は秒に変換(65)すること。
-       - 累積タイムしか書かれていない場合は、引き算してラップを算出すること。
+    持久走の記録用紙を読み取ってください。
+    全てのラップタイムを正確に抽出することが最重要です。
 
-    出力は以下のPython辞書形式（JSON）のみを行ってください。余計な文章やマークダウン(```json等)は不要です。
-    {
-        "name": "増田",
-        "gender": "男子",
-        "distances": "3000, 3100",
-        "laps": "60, 62, 65, 68"
-    }
+    【抽出項目】
+    1. "name": 名前 (不明なら"選手")
+    2. "gender": "男子" or "女子"
+    3. "distances": [3000, 3000] のように距離(m)のリスト
+    4. "laps": [68, 70, 72...] のように1周ごとのラップ(秒)のリスト。
+       - "1'05"は65に変換。
+       - 累積タイムしか書かれていない場合は、必ず引き算して「その周回のラップ」を算出すること。
+
+    Output JSON format:
+    {"name": str, "gender": str, "distances": list[int], "laps": list[int]}
     """
     
     try:
         response = model.generate_content([prompt, img])
-        return response.text
-    except Exception as e:
-        return f"エラー: {e}"
+        return json.loads(response.text)
+    except:
+        return None
 
 # ==========================================
-# 2. 科学的分析エンジン
+# 2. スーパー・サイエンス・ロジック (3000m特化)
 # ==========================================
-class SuperScienceEngine:
+class ScienceEngine:
     def __init__(self, gender="男子"):
         self.gender = gender
-        self.time_limit = 900 if gender == "男子" else 720
-        self.target_dist = 3000 if gender == "男子" else 2100
+        self.target_dist = 3000 if gender == "男子" else 2000
 
-    def calculate_vo2_max(self, distance):
-        dist_12min = distance * (12/15) if self.gender == "男子" else distance
-        return (dist_12min - 504.9) / 44.73
-
-    def generate_detailed_advice(self, laps, total_dist):
-        if len(laps) < 3: return "データ不足のため分析できません。"
-        
+    def analyze(self, laps, total_dist):
         laps_np = np.array(laps)
+        if len(laps) == 0: return "データなし", 0, 0, 0
+        
         avg_pace = np.mean(laps_np)
-        std_dev = np.std(laps_np)
-        drop_off = np.max(laps_np) - np.min(laps_np)
+        max_pace = np.max(laps_np)
+        min_pace = np.min(laps_np)
         
-        advice = ""
-        cv = (std_dev / avg_pace) * 100
+        # AT値の検出（前の周より3秒以上落ちた最初のポイント）
+        at_point = None
+        for i in range(1, len(laps)):
+            if laps[i] - laps[i-1] >= 3.0:
+                at_point = i + 1
+                break
         
-        if cv < 3.0:
-            advice += "【精密機械のようなペース管理】\nラップの変動係数が極めて低く、体内時計が正確です。\n"
-        elif cv > 8.0:
-            advice += f"【ペース配分の改善余地】\nラップに最大{drop_off:.0f}秒の乱高下があります。序盤のオーバーペースに注意。\n"
+        # 3000m/2000m 予測タイム
+        current_total_time = np.sum(laps_np)
+        estimated_time = current_total_time
+        if total_dist < self.target_dist:
+            remaining_dist = self.target_dist - total_dist
+            laps_needed = remaining_dist / (total_dist / len(laps))
+            estimated_time += laps_needed * avg_pace * 1.05 # 疲労係数
+            
+        advice = f"【レース分析】\n"
+        advice += f"平均ラップ: {avg_pace:.1f}秒 (最大差: {max_pace - min_pace:.1f}秒)\n"
+        
+        if at_point:
+            advice += f"⚠️ AT値到達: {at_point}周目\nここでガクッとペースが落ちています。ここが現在の限界点です。\n"
         else:
-            advice += "【安定した走力】\n全体を通して粘り強く走れています。\n"
+            advice += "✅ AT値未到達: 最後までペースを維持できています。\n"
 
-        first_half = np.mean(laps[:len(laps)//2])
-        second_half = np.mean(laps[len(laps)//2:])
-        if second_half < first_half:
-            advice += "後半にペースが上がる「ネガティブ・スプリット」を達成しており、理想的です。\n"
+        advice += f"\n【{self.target_dist}m 戦略・予測】\n"
+        m, s = divmod(estimated_time, 60)
+        advice += f"予測タイム: {int(m)}分{int(s):02d}秒\n"
         
-        target_pace = avg_pace * 0.98
-        advice += "\n【今後の強化指針】\n"
-        if total_dist >= (3000 if self.gender == "男子" else 2100):
-            advice += f"すでに高水準です。設定{target_pace:.0f}秒でのインターバル走が有効です。"
-        else:
-            advice += "まずは基礎スタミナの強化が必要です。ビルドアップ走に取り組みましょう。"
+        target_pace = avg_pace * 0.97
+        advice += f"次回の目標ラップ: {target_pace:.0f}秒\n"
+        advice += "後半の落ち込みを防ぐため、序盤の入りをあと1秒抑えましょう。"
 
-        return advice
+        return advice, at_point
 
 # ==========================================
-# 3. レポート描画エンジン
+# 3. レポート描画エンジン (即時生成)
 # ==========================================
 class ReportGenerator:
     @staticmethod
-    def create_image(student_data):
+    def create_image(data):
         plt.close('all')
-        name = student_data["name"]
-        gender = student_data["gender"]
+        name = data.get("name", "選手")
+        gender = data.get("gender", "男子")
+        laps = data.get("laps", [])
+        dists = data.get("distances", [3000])
+        total_dist = max(dists) if dists else 3000
         
-        # データ整形
-        try:
-            d_str = str(student_data["distances"]).replace(" ", "").replace("　", "").replace("[", "").replace("]", "").replace("'", "")
-            l_str = str(student_data["laps"]).replace(" ", "").replace("　", "").replace("[", "").replace("]", "").replace("'", "")
-            dists = [float(x) for x in d_str.split(",") if x and x.replace('.','',1).isdigit()]
-            laps = [float(x) for x in l_str.split(",") if x and x.replace('.','',1).isdigit()]
-        except:
-            return None
+        if not laps: return None
 
-        if not dists or not laps: return None
-
-        pb_dist = max(dists)
-        pb_idx = dists.index(pb_dist)
+        engine = ScienceEngine(gender)
+        advice, at_point = engine.analyze(laps, total_dist)
         
-        engine = SuperScienceEngine(gender)
-        vo2_max = engine.calculate_vo2_max(pb_dist)
-        pb_vel = pb_dist / engine.time_limit
-        advice_text = engine.generate_detailed_advice(laps, pb_dist)
-        
+        # 描画
         fig = plt.figure(figsize=(11.69, 8.27), dpi=100, facecolor='white')
         plt.axis('off')
+        
+        # タイトル
+        fig.text(0.5, 0.93, f"{name} 様：持久走 科学的分析レポート", fontsize=22, ha='center', weight='bold')
 
-        target_race = "3000m" if gender == "男子" else "2100m"
-        fig.text(0.5, 0.92, f"{name} 様：持久走 科学的分析 ＆ {target_race} 予測ナビ", fontsize=20, ha='center', weight='bold', color='#1A2A3A')
+        # ① 分析サマリ (左上)
+        ax1 = fig.add_axes([0.05, 0.60, 0.40, 0.25])
+        ax1.set_axis_off(); ax1.add_patch(plt.Rectangle((0,0),1,1,color='#F0F8FF',transform=ax1.transAxes))
+        
+        m, s = divmod(sum(laps), 60)
+        summary = f"● 距離: {total_dist}m\n● タイム: {int(m)}分{int(s):02d}秒\n● 平均ラップ: {np.mean(laps):.1f}秒"
+        ax1.text(0.05, 0.5, summary, fontsize=14, linespacing=2.0, va='center')
+        ax1.text(0, 1.05, "① 記録サマリ", fontsize=14, weight='bold', transform=ax1.transAxes)
 
-        ax1 = fig.add_axes([0.05, 0.58, 0.40, 0.28])
-        ax1.set_axis_off()
-        ax1.add_patch(plt.Rectangle((0, 0), 1, 1, color='#F8F9FA', transform=ax1.transAxes))
-        eval_text = (f"【PB時の生理学的データ】\n● 性別・種目: {gender} {int(engine.time_limit/60)}分間走\n● 推定VO2 Max: {vo2_max:.1f} ml/kg/min\n● 自己ベスト: {pb_dist}m (第{pb_idx+1}回)\n● 平均秒速: {pb_vel:.2f} m/s\n\n【専門的評価】\n算出されたVO2 Maxに基づくと、{target_race}走において高い適性を示しています。")
-        ax1.text(0.05, 0.5, eval_text, fontsize=10, linespacing=1.9, va='center')
-        ax1.text(0, 1.05, "① 科学的データによる走力評価", fontsize=12, weight='bold', transform=ax1.transAxes)
-
-        ax2 = fig.add_axes([0.50, 0.50, 0.45, 0.36])
+        # ② ラップ＆スプリット表 (右上) - 全周回表示
+        ax2 = fig.add_axes([0.50, 0.50, 0.45, 0.35])
         ax2.set_axis_off()
-        header = ["周回", "ラップ", "累積"]
+        
+        header = ["周", "ラップ", "スプリット"]
         table_data = []
-        cum_time = 0
-        display_limit = min(len(laps), 13)
-        for i in range(display_limit):
-            cum_time += laps[i]
-            m, s = divmod(cum_time, 60)
-            table_data.append([f"{i+1}周", f"{laps[i]:.0f}s", f"{int(m)}:{int(s):02d}"])
-        t2 = ax2.table(cellText=table_data, colLabels=header, loc='center', cellLoc='center', colColours=["#1A2A3A"]*3)
-        t2.auto_set_font_size(False); t2.set_fontsize(9)
-        for i in range(1, len(table_data)):
-            if laps[i] - laps[i-1] >= 3.0: t2.get_celld()[(i+1, 1)].set_facecolor('#FFDADA')
+        cum = 0
+        # スペースの都合上、最大15周まで表示（それ以上は省略）
+        display_laps = laps[:15]
+        
+        for i, lap in enumerate(display_laps):
+            cum += lap
+            sm, ss = divmod(cum, 60)
+            table_data.append([f"{i+1}", f"{lap:.0f}", f"{int(sm)}:{int(ss):02d}"])
+            
+        t2 = ax2.table(cellText=table_data, colLabels=header, loc='center', cellLoc='center', colColours=["#333"]*3)
+        t2.auto_set_font_size(False); t2.set_fontsize(10)
+        
+        # ヘッダー色調整
         for (r, c), cell in t2.get_celld().items():
-            if r == 0: cell.get_text().set_color('white'); cell.set_height(0.055)
-        ax2.text(0, 1.02, "② ラップタイム精密分析", fontsize=12, weight='bold', transform=ax2.transAxes)
+            if r == 0: cell.get_text().set_color('white')
+            # AT値の行を赤くする
+            if at_point and r == at_point:
+                cell.set_facecolor('#FFCCCC')
 
+        ax2.text(0, 1.02, "② ラップ / スプリット", fontsize=14, weight='bold', transform=ax2.transAxes)
+
+        # ③ グラフ (左下)
         ax3 = fig.add_axes([0.05, 0.05, 0.40, 0.45])
-        ax3.set_axis_off()
-        t_base = engine.target_dist / pb_vel
-        targets = [t_base, t_base*0.98, t_base*0.96, t_base*0.94]
-        header3 = ["周回", "PB維持", "PB超え", "大幅更新", "限界突破"]
-        rows3 = []
-        total_laps_target = int(engine.target_dist / 300)
-        for lp in range(1, total_laps_target + 1):
-            row = [f"{lp}周"]
-            for v in targets:
-                st_time = v * (lp/total_laps_target)
-                row.append(f"{int(st_time//60)}:{int(st_time%60):02d}")
-            rows3.append(row)
-        t3 = ax3.table(cellText=rows3, colLabels=header3, loc='center', cellLoc='center', colColours=["#2980B9"]*5)
-        t3.auto_set_font_size(False); t3.set_fontsize(8)
-        for (r, c), cell in t3.get_celld().items():
-            if r == 0: cell.get_text().set_color('white'); cell.set_height(0.12)
-            else: cell.set_height(0.06)
-        ax3.text(0, 1.05, f"③ {target_race}走：目標通過タイム表", fontsize=12, weight='bold', color='#2980B9', transform=ax3.transAxes)
+        ax3.plot(range(1, len(laps)+1), laps, marker='o', linewidth=2, color='#2980B9')
+        ax3.set_title("ペース推移グラフ", fontsize=12)
+        ax3.set_xlabel("周回"); ax3.set_ylabel("タイム(秒)")
+        ax3.grid(True, linestyle='--', alpha=0.6)
+        if at_point:
+            ax3.axvline(x=at_point, color='red', linestyle='--', label='AT Point')
+            ax3.legend()
 
-        ax4 = fig.add_axes([0.50, 0.05, 0.45, 0.38])
-        ax4.set_axis_off()
-        ax4.add_patch(plt.Rectangle((0, 0), 1, 1, fill=False, edgecolor='#1A2A3A', linewidth=1.2, transform=ax4.transAxes))
-        ax4.text(0.05, 0.5, advice_text, fontsize=9, linespacing=1.8, va='center')
-        ax4.text(0, 1.05, "④ 科学的分析と強化指針", fontsize=12, weight='bold', transform=ax4.transAxes)
+        # ④ 鬼コーチのアドバイス (右下)
+        ax4 = fig.add_axes([0.50, 0.05, 0.45, 0.35])
+        ax4.set_axis_off(); ax4.add_patch(plt.Rectangle((0,0),1,1,fill=False,edgecolor='#333',linewidth=2,transform=ax4.transAxes))
+        ax4.text(0.05, 0.9, "④ 科学的アドバイス・予測", fontsize=14, weight='bold')
+        ax4.text(0.05, 0.4, advice, fontsize=11, linespacing=1.6)
 
         buf = io.BytesIO()
-        plt.savefig(buf, format="png", bbox_inches='tight', pad_inches=0.2)
+        plt.savefig(buf, format="png", bbox_inches='tight')
         plt.close()
         buf.seek(0)
         return buf
 
 # ==========================================
-# 4. アプリケーション画面 (AI Vision搭載・自動化版)
+# 4. アプリUI (超速モード)
 # ==========================================
 def main():
-    st.set_page_config(page_title="持久走分析エージェント", layout="wide")
-    st.title("🏃‍♂️ 持久走・科学的分析 (AI自動読み取り)")
-    
-    # セッション状態の初期化
-    if 'student_df' not in st.session_state:
-        st.session_state.student_df = pd.DataFrame(columns=["name", "gender", "distances", "laps"])
+    st.set_page_config(page_title="持久走即時分析", layout="wide")
+    st.title("⏱️ 3000m/持久走 即時分析システム")
+    st.info("画像をアップロードするだけで、AIが読み取り・分析・レポート作成まで一気に行います。")
 
-    # 1. 画像アップロード (ここに入れるだけで動く！)
-    st.info("【使い方】\n記録用紙の写真をアップロードしてください。AIが自動で読み取って表に追加します。")
-    uploaded_files = st.file_uploader("📸 記録用紙をアップロード", accept_multiple_files=True, type=['png', 'jpg', 'jpeg'])
+    uploaded_files = st.file_uploader("記録用紙をアップロード (複数枚OK)", accept_multiple_files=True, type=['png', 'jpg', 'jpeg'])
 
-    # 2. 自動解析ロジック (アップロードされたら即実行)
     if uploaded_files:
-        # まだ解析していないファイルだけ処理する
-        for file in uploaded_files:
-            # ファイル名で重複チェック（簡易的）
-            if 'processed_files' not in st.session_state:
-                st.session_state.processed_files = []
+        japanize_matplotlib.japanize()
+        
+        # ZIP作成準備
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
             
-            if file.name not in st.session_state.processed_files:
-                with st.spinner(f"AIが解析中... ({file.name})"):
-                    try:
-                        bytes_data = file.getvalue()
-                        result_text = analyze_image_with_gemini(bytes_data)
+            # 画像の数だけループ
+            cols = st.columns(2)
+            for i, file in enumerate(uploaded_files):
+                with cols[i % 2]:
+                    with st.spinner(f"{file.name} を解析中..."):
+                        # 1. 読み取り
+                        data = analyze_image_with_gemini(file.getvalue())
                         
-                        # JSON抽出
-                        start = result_text.find('{')
-                        end = result_text.rfind('}') + 1
-                        if start != -1 and end != -1:
-                            json_str = result_text[start:end]
-                            data = json.loads(json_str)
+                        if data:
+                            # 2. レポート作成 (表への転記プロセスをスキップ)
+                            img_buf = ReportGenerator.create_image(data)
                             
-                            new_row = {
-                                "name": data.get("name", "不明"),
-                                "gender": data.get("gender", "男子"),
-                                "distances": str(data.get("distances", "3000")).replace("[","").replace("]",""),
-                                "laps": str(data.get("laps", "")).replace("[","").replace("]","")
-                            }
-                            st.session_state.student_df = pd.concat([st.session_state.student_df, pd.DataFrame([new_row])], ignore_index=True)
-                            st.session_state.processed_files.append(file.name)
-                            st.success(f"読み取り成功: {new_row['name']}さん")
-                        else:
-                            st.error(f"読み取り失敗: {file.name}")
-                    except Exception as e:
-                        st.error(f"エラー: {e}")
-
-    # 3. 編集・確認エリア
-    st.subheader("📝 データ確認・修正")
-    edited_df = st.data_editor(
-        st.session_state.student_df,
-        num_rows="dynamic",
-        column_config={
-            "name": "氏名",
-            "gender": st.column_config.SelectboxColumn("性別", options=["男子", "女子"]),
-            "distances": "記録(m)",
-            "laps": "ラップ(秒)"
-        }
-    )
-
-    # 4. レポート生成
-    if st.button("🚀 診断レポートを一括生成", type="primary"):
-        if len(edited_df) > 0:
-            japanize_matplotlib.japanize()
-            zip_buffer = io.BytesIO()
-            has_data = False
-            with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
-                cols = st.columns(2)
-                for idx, row in edited_df.iterrows():
-                    if not row["name"]: continue
-                    has_data = True
-                    with cols[idx % 2]:
-                        try:
-                            img_buf = ReportGenerator.create_image(row)
                             if img_buf:
-                                st.image(img_buf, caption=f"{row['name']}様のレポート")
-                                zip_file.writestr(f"{row['name']}_report.png", img_buf.getvalue())
-                        except Exception as e:
-                            st.error(f"描画エラー: {e}")
-            
-            if has_data:
-                st.download_button("📥 ダウンロード (ZIP)", data=zip_buffer.getvalue(), file_name="reports.zip", mime="application/zip")
-        else:
-            st.warning("データがありません。画像をアップロードするか、直接入力してください。")
+                                # 3. 即表示
+                                st.image(img_buf, caption=f"{data.get('name')}選手のレポート")
+                                # ZIPに追加
+                                zip_file.writestr(f"{data.get('name')}_report.png", img_buf.getvalue())
+                            else:
+                                st.error("データ不足で描画できませんでした")
+                        else:
+                            st.error(f"{file.name}: AI読み取り失敗")
+
+        # 最後にまとめてダウンロードボタン
+        st.write("---")
+        st.download_button(
+            label="📥 全員のレポートを一括ダウンロード (ZIP)",
+            data=zip_buffer.getvalue(),
+            file_name="race_reports.zip",
+            mime="application/zip",
+            type="primary"
+        )
 
 if __name__ == "__main__":
     main()
