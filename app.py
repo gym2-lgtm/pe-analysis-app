@@ -12,35 +12,38 @@ import matplotlib.font_manager as fm
 import urllib.request
 
 # ==========================================
-# 設定：APIキー
+# 設定：APIキー & 通信設定
 # ==========================================
 API_KEY = "AIzaSyATM7vIfyhj6vKsZga3fydYLHvAMRVNdzg"
 
+# ★修正点1 & 3: 設定を関数の外に出し、通信方式を 'rest' に固定して安定化
+genai.configure(api_key=API_KEY, transport='rest')
+
 # ==========================================
-# 0. 日本語フォント設定 (japanize-matplotlibの代わり)
+# 0. 日本語フォント設定 (japanize-matplotlib代替)
 # ==========================================
 def setup_japanese_font():
-    # 日本語フォント(NotoSansJP)をダウンロードして適用する
+    # 日本語フォント(NotoSansJP)をダウンロードして適用
     font_path = "NotoSansJP-Regular.ttf"
     font_url = "https://github.com/google/fonts/raw/main/ofl/notosansjp/NotoSansJP-Regular.ttf"
     
     try:
         if not os.path.exists(font_path):
-            with st.spinner("日本語フォントを準備中..."):
-                urllib.request.urlretrieve(font_url, font_path)
+            # 初回のみダウンロード
+            urllib.request.urlretrieve(font_url, font_path)
         
         fm.fontManager.addfont(font_path)
         plt.rcParams['font.family'] = 'Noto Sans JP'
     except Exception as e:
-        # 失敗したら英語フォントのまま進める（エラーで止まるよりマシ）
-        st.warning(f"フォント設定エラー: {e}")
+        # 万が一失敗しても止まらせない
+        pass
 
 # ==========================================
 # 1. AI読み取りエンジン
 # ==========================================
 def analyze_image_with_gemini(img_obj):
-    genai.configure(api_key=API_KEY)
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    # ★修正点2: モデル名を 'gemini-1.5-flash-latest' に変更
+    model = genai.GenerativeModel('gemini-1.5-flash-latest')
     
     prompt = """
     持久走の記録用紙を読み取ってください。
@@ -61,13 +64,14 @@ def analyze_image_with_gemini(img_obj):
     try:
         response = model.generate_content([prompt, img_obj])
         text = response.text
+        # JSON部分だけを抽出
         json_match = re.search(r'\{.*\}', text, re.DOTALL)
         if json_match:
             return json.loads(json_match.group(0)), None
         else:
             return None, "データを読み取れませんでした。"
     except Exception as e:
-        return None, f"エラー: {e}"
+        return None, f"通信エラー: {e}"
 
 # ==========================================
 # 2. 分析ロジック
@@ -110,7 +114,7 @@ class ReportGenerator:
     @staticmethod
     def create_image(data):
         plt.close('all')
-        setup_japanese_font() # ★ここでフォント設定を実行
+        setup_japanese_font() # フォント設定
         
         try:
             name = data.get("name", "あなた")
@@ -163,7 +167,7 @@ def main():
         with st.spinner("AI分析中..."):
             try:
                 image = Image.open(uploaded_file)
-                image = ImageOps.exif_transpose(image)
+                image = ImageOps.exif_transpose(image) # 回転直し
                 st.image(image, caption="送信画像", width=200)
                 
                 data, error = analyze_image_with_gemini(image)
