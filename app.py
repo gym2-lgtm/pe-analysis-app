@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import japanize_matplotlib
 import io
 import google.generativeai as genai
-from PIL import Image
+from PIL import Image, ImageOps # ★変更点1: ImageOpsを追加
 import json
 import re
 
@@ -15,24 +15,20 @@ import re
 API_KEY = "AIzaSyATM7vIfyhj6vKsZga3fydYLHvAMRVNdzg"
 
 # ==========================================
-# 1. AI読み取りエンジン (生徒の文字を解読)
+# 1. AI読み取りエンジン (回転対応版)
 # ==========================================
-def analyze_image_with_gemini(image_bytes):
+def analyze_image_with_gemini(img_obj):
+    """PIL Imageオブジェクトを受け取って解析する"""
     genai.configure(api_key=API_KEY)
     model = genai.GenerativeModel('gemini-1.5-flash')
     
-    try:
-        img = Image.open(io.BytesIO(image_bytes))
-    except:
-        return None, "画像を読み込めませんでした。"
-    
-    # プロンプト：生徒向けに最適化
+    # プロンプト：生徒向け
     prompt = """
     持久走の記録用紙を読み取ってください。
     
     【重要：距離設定】
     - 男子は通常 3000m
-    - 女子は通常 2100m (記録が短い場合は2100と判断して)
+    - 女子は通常 2100m (記録が短い場合は2100と判断)
     
     【抽出項目】
     1. 名前 (name): 読めなければ "あなた"
@@ -47,9 +43,8 @@ def analyze_image_with_gemini(image_bytes):
     """
     
     try:
-        response = model.generate_content([prompt, img])
+        response = model.generate_content([prompt, img_obj])
         text = response.text
-        # JSON抽出
         json_match = re.search(r'\{.*\}', text, re.DOTALL)
         if json_match:
             return json.loads(json_match.group(0)), None
@@ -64,7 +59,6 @@ def analyze_image_with_gemini(image_bytes):
 class ScienceEngine:
     def __init__(self, gender="男子"):
         self.gender = gender
-        # ★ここを修正しました
         if self.gender == "女子":
             self.target_dist = 2100
         else:
@@ -87,13 +81,11 @@ class ScienceEngine:
         current_time = sum(laps)
         pred_time = current_time
         
-        # もし途中までのデータなら、残りを予測
         if total_dist < self.target_dist:
             remaining = self.target_dist - total_dist
-            lap_dist = total_dist / len(laps) # 1周の距離
+            lap_dist = total_dist / len(laps) if len(laps) > 0 else 0
             if lap_dist > 0:
                 laps_needed = remaining / lap_dist
-                # 後半の疲労(1.05倍)を考慮
                 pred_time += laps_needed * avg_pace * 1.05
 
         # 生徒へのメッセージ
@@ -114,7 +106,7 @@ class ScienceEngine:
         return advice, at_point
 
 # ==========================================
-# 3. レポート描画 (スマホで見やすいレイアウト)
+# 3. レポート描画 (スマホ最適化)
 # ==========================================
 class ReportGenerator:
     @staticmethod
@@ -124,14 +116,10 @@ class ReportGenerator:
         try:
             name = data.get("name", "あなた")
             gender = data.get("gender", "男子")
-            
-            # データ整形
             laps = data.get("laps", [])
             if isinstance(laps, str): laps = [float(x) for x in re.findall(r"[\d\.]+", laps)]
-            
             dists = data.get("distances", [3000])
             if isinstance(dists, str): dists = [float(x) for x in re.findall(r"[\d\.]+", dists)]
-            
             total_dist = max(dists) if dists else 3000
         except:
             return None
@@ -141,18 +129,15 @@ class ReportGenerator:
         engine = ScienceEngine(gender)
         advice, at_point = engine.analyze(laps, total_dist)
         
-        # A4縦に近い比率（スマホでスクロールして見やすい）
         fig = plt.figure(figsize=(8.27, 11.69), dpi=100, facecolor='white')
         plt.axis('off')
         
-        # タイトル
         fig.text(0.5, 0.95, f"{name}さんの分析レポート", fontsize=24, ha='center', weight='bold', color='#1A2A3A')
 
         # ① 結果サマリ
         ax1 = fig.add_axes([0.1, 0.75, 0.8, 0.15])
         ax1.set_axis_off()
         ax1.add_patch(plt.Rectangle((0,0),1,1,color='#E6F3FF',transform=ax1.transAxes, zorder=0))
-        
         m, s = divmod(sum(laps), 60)
         summary = f"距離: {total_dist}m\nタイム: {int(m)}分{int(s):02d}秒\n平均ラップ: {np.mean(laps):.1f}秒"
         ax1.text(0.5, 0.5, summary, fontsize=18, ha='center', va='center', linespacing=1.8)
@@ -182,28 +167,33 @@ class ReportGenerator:
         return buf
 
 # ==========================================
-# 4. アプリUI (生徒用・超シンプル)
+# 4. アプリUI (生徒用)
 # ==========================================
 def main():
-    st.set_page_config(page_title="持久走分析", layout="centered") # スマホ向けに中央寄せ
-    
+    st.set_page_config(page_title="持久走分析", layout="centered")
     st.title("🏃‍♂️ 持久走分析アプリ")
     st.write("記録用紙の写真をアップロードすると、すぐに分析結果が出ます。")
     
-    # 1. 画像アップロード (カメラ起動ボタンになる)
     uploaded_file = st.file_uploader("ここをタップして写真を撮る", type=['png', 'jpg', 'jpeg'])
 
-    # 2. アップロードされたら即実行
     if uploaded_file:
         with st.spinner("AIが分析しています...少々お待ちください"):
-            # 画像を表示
-            st.image(uploaded_file, caption="読み込んだ画像", width=200)
+            # ★変更点2: 画像の向きを正しく直す処理を追加
+            try:
+                image = Image.open(uploaded_file)
+                # スマホの回転情報を元に画像を正しい向きに直す
+                image = ImageOps.exif_transpose(image)
+            except Exception as e:
+                st.error(f"画像の読み込みに失敗しました: {e}")
+                return
+
+            # 回転済みの画像を表示
+            st.image(image, caption="読み込んだ画像", width=200)
             
-            # AI解析
-            data, error = analyze_image_with_gemini(uploaded_file.getvalue())
+            # AI解析（回転済みの画像データを渡す）
+            data, error = analyze_image_with_gemini(image)
             
             if data:
-                # レポート作成
                 japanize_matplotlib.japanize()
                 img_buf = ReportGenerator.create_image(data)
                 
