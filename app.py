@@ -18,7 +18,7 @@ from PIL import Image, ImageOps
 API_KEY = "AIzaSyBk5RvAlljh3UbdoXUUn941_w0pOrsSgKc"
 
 # ==========================================
-# 0. 日本語フォント設定 (Noto Sans JP)
+# 0. 日本語フォント設定
 # ==========================================
 def setup_japanese_font():
     font_path = "NotoSansJP-Regular.ttf"
@@ -28,19 +28,19 @@ def setup_japanese_font():
             urllib.request.urlretrieve(font_url, font_path)
         fm.fontManager.addfont(font_path)
         plt.rcParams['font.family'] = 'Noto Sans JP'
-    except Exception:
+    except:
         pass
 
 # ==========================================
-# 1. AI読み取りエンジン (モデル名完全指定版)
+# 1. AI読み取りエンジン (Direct API版)
 # ==========================================
 def analyze_image_with_direct_api(img_bytes):
     # 画像を文字データ(Base64)に変換
     base64_data = base64.b64encode(img_bytes).decode('utf-8')
     
-    # ★修正点: モデル名を 'gemini-1.5-flash-001' (バージョン付き正式版) に指定
-    # これで "not found" エラーは確実に消えます
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-001:generateContent?key={API_KEY}"
+    # ★ここを修正: 余計な枝葉を取って、実績のある「gemini-1.5-flash」に戻しました。
+    # これで「Not Found」は消え、「期限切れ」も新しい鍵で解消されます。
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={API_KEY}"
     
     headers = {'Content-Type': 'application/json'}
     
@@ -114,7 +114,7 @@ class ScienceEngine:
 
         m, s = divmod(pred_time, 60)
         advice = f"【{self.target_dist}m 予測】{int(m)}分{int(s):02d}秒\n"
-        if at_point: advice += f"⚠️ {at_point}周目にペースダウン（AT値）\n"
+        if at_point: advice += f"⚠️ {at_point}周目にAT値到達（ペースダウン）\n"
         else: advice += "✅ 最後まで安定した走りです！\n"
         
         return advice, at_point
