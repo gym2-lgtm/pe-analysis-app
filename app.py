@@ -15,38 +15,37 @@ import re
 API_KEY = "AIzaSyATM7vIfyhj6vKsZga3fydYLHvAMRVNdzg"
 
 # ==========================================
-# 1. AI読み取りエンジン (Gemini Pro Vision版)
+# 1. AI読み取りエンジン (Gemini 1.5 Flash版)
 # ==========================================
 def analyze_image_with_gemini(img_obj):
     genai.configure(api_key=API_KEY)
-    
-    # ★変更点: 古い環境でも動く "gemini-pro-vision" を使用
-    # ※設定もシンプルにしてエラーを回避
-    model = genai.GenerativeModel('gemini-pro-vision')
+    # ★ここを現役モデルに戻しました
+    model = genai.GenerativeModel('gemini-1.5-flash')
     
     prompt = """
-    あなたは持久走の記録係です。画像の記録用紙から数値を読み取ってください。
+    持久走の記録用紙を読み取ってください。
     
-    【ルール】
-    - 男子は3000m、女子は2100mが基準。
-    - 名前、性別、距離、全てのラップタイム(秒)を抽出すること。
-    - 分秒表記(例: 1'20)は秒(80)に変換すること。
-    
-    回答は以下のJSON形式の文字列だけで答えてください。余計な挨拶は不要です。
-    {"name": "名前", "gender": "男子", "distances": [3000], "laps": [70, 72, 75]}
+    【距離設定】男子3000m、女子2100m。
+    【抽出項目】
+    1. 名前 (name): 読めなければ "あなた"
+    2. 性別 (gender): "男子" or "女子"
+    3. 距離 (distances): 完走距離のリスト
+    4. ラップ (laps): 1周ごとのタイム(秒)のリスト
+       - 分秒表記(1'20)は秒(80)に変換
+       - 累積タイムなら引き算して計算
+       
+    Output JSON format only:
+    {"name": "名前", "gender": "男子", "distances": [3000], "laps": [70, 72]}
     """
     
     try:
-        # 古いバージョン向けに設定を削除してシンプルに呼び出す
         response = model.generate_content([prompt, img_obj])
         text = response.text
-        
-        # JSON部分を探し出す
         json_match = re.search(r'\{.*\}', text, re.DOTALL)
         if json_match:
             return json.loads(json_match.group(0)), None
         else:
-            return None, "データを読み取れませんでした。画像が鮮明か確認してください。"
+            return None, "データを読み取れませんでした。"
     except Exception as e:
         return None, f"エラー: {e}"
 
@@ -56,14 +55,10 @@ def analyze_image_with_gemini(img_obj):
 class ScienceEngine:
     def __init__(self, gender="男子"):
         self.gender = gender
-        if self.gender == "女子":
-            self.target_dist = 2100
-        else:
-            self.target_dist = 3000
+        self.target_dist = 2100 if gender == "女子" else 3000
 
     def analyze(self, laps, total_dist):
         if not laps: return "", None
-
         laps_np = np.array(laps)
         avg_pace = np.mean(laps_np)
         
@@ -75,26 +70,17 @@ class ScienceEngine:
         
         current_time = sum(laps)
         pred_time = current_time
-        
         if total_dist < self.target_dist:
             remaining = self.target_dist - total_dist
             lap_dist = total_dist / len(laps) if len(laps) > 0 else 0
             if lap_dist > 0:
-                laps_needed = remaining / lap_dist
-                pred_time += laps_needed * avg_pace * 1.05
+                pred_time += (remaining / lap_dist) * avg_pace * 1.05
 
-        advice = f"【{self.target_dist}m 分析結果】\n"
         m, s = divmod(pred_time, 60)
-        advice += f"🏁 予測タイム: {int(m)}分{int(s):02d}秒\n"
+        advice = f"【{self.target_dist}m 予測】{int(m)}分{int(s):02d}秒\n"
+        if at_point: advice += f"⚠️ {at_point}周目にペースダウン（AT値）\n"
+        else: advice += "✅ 安定したペース配分です！\n"
         
-        if at_point:
-            advice += f"⚠️ {at_point}周目にペースダウンしています。\nここが『スタミナの壁(AT値)』です。\n"
-        else:
-            advice += "✅ 最後まで安定した素晴らしい走りです！\n"
-            
-        target = avg_pace * 0.98
-        advice += f"\n💡 次回の目標ラップ: {target:.0f}秒\n"
-
         return advice, at_point
 
 # ==========================================
@@ -115,35 +101,26 @@ class ReportGenerator:
         except: return None
 
         if not laps: return None
-
         engine = ScienceEngine(gender)
         advice, at_point = engine.analyze(laps, total_dist)
         
         fig = plt.figure(figsize=(8.27, 11.69), dpi=100, facecolor='white')
         plt.axis('off')
+        fig.text(0.5, 0.95, f"{name}さんの分析レポート", fontsize=24, ha='center', weight='bold')
         
-        fig.text(0.5, 0.95, f"{name}さんの分析レポート", fontsize=24, ha='center', weight='bold', color='#1A2A3A')
-
         ax1 = fig.add_axes([0.1, 0.75, 0.8, 0.15])
-        ax1.set_axis_off()
-        ax1.add_patch(plt.Rectangle((0,0),1,1,color='#E6F3FF',transform=ax1.transAxes, zorder=0))
+        ax1.set_axis_off(); ax1.add_patch(plt.Rectangle((0,0),1,1,color='#E6F3FF',transform=ax1.transAxes))
         m, s = divmod(sum(laps), 60)
-        summary = f"距離: {total_dist}m\nタイム: {int(m)}分{int(s):02d}秒\n平均ラップ: {np.mean(laps):.1f}秒"
-        ax1.text(0.5, 0.5, summary, fontsize=18, ha='center', va='center', linespacing=1.8)
+        ax1.text(0.5, 0.5, f"距離: {total_dist}m\nタイム: {int(m)}分{int(s):02d}秒", fontsize=18, ha='center', va='center')
 
         ax2 = fig.add_axes([0.1, 0.45, 0.8, 0.25])
         ax2.plot(range(1, len(laps)+1), laps, marker='o', linewidth=3, color='#FF6B6B')
-        ax2.set_title("ラップ推移", fontsize=16)
-        ax2.grid(True, linestyle='--', alpha=0.5)
-        if at_point:
-            ax2.axvline(x=at_point, color='blue', linestyle='--', label='AT値')
-            ax2.legend(fontsize=12)
+        ax2.set_title("ラップ推移"); ax2.grid(True, linestyle='--', alpha=0.5)
+        if at_point: ax2.axvline(x=at_point, color='blue', linestyle='--', label='AT値'); ax2.legend()
 
         ax3 = fig.add_axes([0.1, 0.10, 0.8, 0.30])
-        ax3.set_axis_off()
-        ax3.add_patch(plt.Rectangle((0,0),1,1,fill=False,edgecolor='#333',linewidth=2,transform=ax3.transAxes))
-        ax3.text(0.05, 0.9, "コーチからのアドバイス", fontsize=16, weight='bold')
-        ax3.text(0.05, 0.5, advice, fontsize=14, linespacing=1.8, va='center')
+        ax3.set_axis_off(); ax3.add_patch(plt.Rectangle((0,0),1,1,fill=False,edgecolor='#333',linewidth=2,transform=ax3.transAxes))
+        ax3.text(0.05, 0.5, advice, fontsize=14, va='center')
 
         buf = io.BytesIO()
         plt.savefig(buf, format="png", bbox_inches='tight')
@@ -157,28 +134,23 @@ class ReportGenerator:
 def main():
     st.set_page_config(page_title="持久走分析", layout="centered")
     st.title("🏃‍♂️ 持久走分析アプリ")
-    st.write("写真をアップロードしてください。")
     
-    uploaded_file = st.file_uploader("カメラで撮影", type=['png', 'jpg', 'jpeg'])
+    uploaded_file = st.file_uploader("写真を撮る", type=['png', 'jpg', 'jpeg'])
 
     if uploaded_file:
-        with st.spinner("AIが分析中..."):
+        with st.spinner("AI分析中..."):
             try:
                 image = Image.open(uploaded_file)
-                image = ImageOps.exif_transpose(image)
-                st.image(image, caption="画像を確認中...", width=200)
+                image = ImageOps.exif_transpose(image) # 回転直し
+                st.image(image, caption="送信画像", width=200)
                 
                 data, error = analyze_image_with_gemini(image)
-                
                 if data:
                     japanize_matplotlib.japanize()
                     img_buf = ReportGenerator.create_image(data)
                     if img_buf:
-                        st.success("完了！")
                         st.image(img_buf, use_column_width=True)
-                        st.markdown("画像を長押しで保存できます")
-                    else:
-                        st.error("データ読み取り失敗")
+                        st.markdown("画像を長押しで保存")
                 else:
                     st.error(error)
             except Exception as e:
