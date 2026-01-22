@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import io
-import requests # 直通電話用のライブラリ
+import requests
 import json
 import re
 import os
@@ -18,7 +18,7 @@ from PIL import Image, ImageOps
 API_KEY = "AIzaSyATM7vIfyhj6vKsZga3fydYLHvAMRVNdzg"
 
 # ==========================================
-# 0. 日本語フォント設定 (自給自足版)
+# 0. 日本語フォント設定
 # ==========================================
 def setup_japanese_font():
     font_path = "NotoSansJP-Regular.ttf"
@@ -35,15 +35,10 @@ def setup_japanese_font():
 # 1. AI読み取りエンジン (直通電話版)
 # ==========================================
 def analyze_image_with_direct_api(img_bytes):
-    # 画像を文字データ(Base64)に変換
     base64_data = base64.b64encode(img_bytes).decode('utf-8')
-    
-    # 直通アドレス (Gemini 1.5 Flash)
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={API_KEY}"
-    
     headers = {'Content-Type': 'application/json'}
     
-    # AIへの命令文
     prompt_text = """
     持久走の記録用紙を読み取ってください。
     
@@ -52,11 +47,10 @@ def analyze_image_with_direct_api(img_bytes):
     - 名前、性別("男子"or"女子")、完走距離(m)、全ラップタイム(秒)を抽出。
     - 分秒表記(1'20)は秒(80)に変換。
     
-    回答は以下のJSON形式のみで出力してください。Markdownなどの装飾は不要です。
+    回答は以下のJSON形式のみで出力してください。
     {"name": "名前", "gender": "男子", "distances": [3000], "laps": [70, 72]}
     """
     
-    # データパック作成
     payload = {
         "contents": [{
             "parts": [
@@ -67,18 +61,16 @@ def analyze_image_with_direct_api(img_bytes):
     }
     
     try:
-        # 直通電話をかける (POST送信)
         response = requests.post(url, headers=headers, json=payload)
         result = response.json()
         
-        # エラーチェック
         if "error" in result:
             return None, f"AIエラー: {result['error']['message']}"
             
-        # 答えを取り出す
+        if 'candidates' not in result:
+             return None, "解析できませんでした。別の写真を試してください。"
+
         text = result['candidates'][0]['content']['parts'][0]['text']
-        
-        # JSON部分を探す
         json_match = re.search(r'\{.*\}', text, re.DOTALL)
         if json_match:
             return json.loads(json_match.group(0)), None
@@ -183,11 +175,14 @@ def main():
                 # 画像処理 (回転対応)
                 image = Image.open(uploaded_file)
                 image = ImageOps.exif_transpose(image)
+                
+                # 表示用
                 st.image(image, caption="送信画像", width=200)
                 
-                # 直通API用にバイトデータに変換
+                # 直通API用にバイトデータに変換（★ここで強制的にJPEG指定！）
                 img_byte_arr = io.BytesIO()
-                image.save(img_byte_arr, format=image.format)
+                # format='JPEG' を指定することで unknown file extension エラーを防ぐ
+                image.save(img_byte_arr, format='JPEG')
                 img_bytes = img_byte_arr.getvalue()
                 
                 # AI解析実行
@@ -196,6 +191,7 @@ def main():
                 if data:
                     img_buf = ReportGenerator.create_image(data)
                     if img_buf:
+                        st.success("完了！")
                         st.image(img_buf, use_column_width=True)
                         st.markdown("画像を長押しで保存")
                 else:
