@@ -16,7 +16,7 @@ from PIL import Image, ImageOps
 # 設定：APIキー
 # ==========================================
 # ★★★ ここに新しいAPIキーを貼り付けてください ★★★
-API_KEY = "AIzaSyDp28clH2pk_FgQELSQJSEtssPa25WaZ74" 
+API_KEY = "AIzaSyC-OhXt-YtEKB7bVv7l3jlIvYOFKZ_ZF6I" 
 
 # ==========================================
 # 0. 日本語フォント設定
@@ -32,15 +32,22 @@ def get_japanese_font_prop():
         return None
 
 # ==========================================
-# 1. AI読み取りエンジン (2つの記録を同時に読む)
+# 1. AI読み取りエンジン (総当たりリトライ機能)
 # ==========================================
 def analyze_image(img_bytes):
-    model_name = "gemini-1.5-flash"
     base64_data = base64.b64encode(img_bytes).decode('utf-8')
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={API_KEY}"
-    headers = {'Content-Type': 'application/json'}
     
-    # プロンプト：上段(15分/12分走)と下段(3000m/2100m)の両方を読む
+    # ★ここが修正点：試すモデルのリスト（上から順にノックします）
+    # どれか一つでも繋がればOKです。
+    models_to_try = [
+        "gemini-1.5-flash",          # 基本
+        "gemini-1.5-flash-latest",   # 最新エイリアス
+        "gemini-1.5-flash-001",      # バージョン固定
+        "gemini-1.5-pro",            # Pro版
+        "gemini-1.5-pro-latest",     # Pro最新
+        "gemini-2.0-flash-exp"       # 実験版（最新鋭）
+    ]
+    
     prompt = """
     持久走記録用紙を読み取り、以下のJSON形式で返答せよ。
     
@@ -48,7 +55,7 @@ def analyze_image(img_bytes):
     用紙は「上段：15分間走(男子)or12分間走(女子)」と「下段：3000m(男子)or2100m(女子)」に分かれている場合がある。
     
     【必須抽出項目】
-    1. name: 名前
+    1. name: 名前 (読めなければ"選手")
     2. long_run_dist: 上段の合計距離(m)。(例: 4050) ※記載がなければ0
     3. time_trial_laps: 下段の各周回のタイム(秒)のリスト。(例: [65, 68...])
        ※分秒表記は秒に変換。累積タイムは区間タイムに直す。
@@ -58,22 +65,42 @@ def analyze_image(img_bytes):
     {"name": "Yamada", "long_run_dist": 4050, "time_trial_laps": [65, 66, 67]}
     """
     
+    headers = {'Content-Type': 'application/json'}
     payload = {"contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "image/jpeg", "data": base64_data}}]}]}
     
-    try:
-        res = requests.post(url, headers=headers, json=payload, timeout=30)
-        result_json = res.json()
-        if "error" in result_json: return None, result_json['error']['message']
-        if 'candidates' not in result_json: return None, "AI応答なし"
+    last_error = ""
+    
+    # ループ処理：つながるモデルが見つかるまで試す
+    for model_name in models_to_try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={API_KEY}"
+        try:
+            # print(f"Testing model: {model_name}...") # デバッグ用
+            res = requests.post(url, headers=headers, json=payload, timeout=30)
+            result_json = res.json()
+            
+            # エラーがあれば次へ
+            if "error" in result_json:
+                error_msg = result_json['error']['message']
+                # 「見つからない(Not Found)」系のエラーなら次を試す
+                if "not found" in error_msg.lower() or "supported" in error_msg.lower():
+                    last_error = f"{model_name} NG: {error_msg}"
+                    continue
+                else:
+                    # 認証エラー(APIキー間違いなど)は即終了
+                    return None, f"APIキー等のエラー: {error_msg}" 
+            
+            # 成功したら解析へ
+            if 'candidates' in result_json:
+                text = result_json['candidates'][0]['content']['parts'][0]['text']
+                match = re.search(r'\{.*\}', text, re.DOTALL)
+                if match:
+                    return json.loads(match.group(0)), None
+            
+        except Exception as e:
+            last_error = str(e)
+            continue
 
-        text = result_json['candidates'][0]['content']['parts'][0]['text']
-        match = re.search(r'\{.*\}', text, re.DOTALL)
-        if match:
-            return json.loads(match.group(0)), None
-        else:
-            return None, "解析失敗"
-    except Exception as e:
-        return None, f"エラー: {e}"
+    return None, f"全てのモデルで失敗しました。最後のエラー: {last_error}"
 
 # ==========================================
 # 2. 科学的分析ロジック (リーゲルの公式実装)
@@ -85,32 +112,27 @@ class ScienceEngine:
         self.tt_laps = np.array(data.get("time_trial_laps", [])) # 3000mの実走データ
         
         # 性別判定（距離から推測）
-        # 15分走で3500m以上なら男子(3000m基準)、それ以下なら女子(2100m基準)と仮定
         self.is_male = True if self.long_run_dist > 3200 else False 
         self.target_dist = 3000 if self.is_male else 2100
         self.long_run_min = 15 if self.is_male else 12
 
     def get_potential_time(self):
-        """15分走/12分走の距離から3000m/2100mの予測タイムを算出 (Riegel's formula)"""
-        if self.long_run_dist == 0: return None # データなし
-        
-        # T2 = T1 * (D2 / D1)^1.06
+        """15分走/12分走の距離から予測タイムを算出 (Riegel's formula)"""
+        if self.long_run_dist == 0: return None
         t1 = self.long_run_min * 60 # 秒
         d1 = self.long_run_dist
         d2 = self.target_dist
-        
         predicted_seconds = t1 * (d2 / d1)**1.06
         return predicted_seconds
 
     def get_vo2_max(self):
         if self.long_run_dist == 0: return 0
-        # 12分走相当に換算して計算
         dist_12min = self.long_run_dist * (12 / self.long_run_min)
         vo2 = (dist_12min - 504.9) / 44.73
         return max(vo2, 0)
 
 # ==========================================
-# 3. レポート描画 (先生の指定レイアウト)
+# 3. レポート描画 (IMG_5066レイアウト)
 # ==========================================
 class ReportGenerator:
     @staticmethod
@@ -120,11 +142,7 @@ class ReportGenerator:
         if not fp: return None
 
         engine = ScienceEngine(data)
-        
-        # 予測タイム（ポテンシャル）の計算
         potential_sec = engine.get_potential_time()
-        
-        # 実走タイム（もしあれば）
         actual_sec = sum(engine.tt_laps) if len(engine.tt_laps) > 0 else 0
         
         # A4横
@@ -136,9 +154,7 @@ class ReportGenerator:
         fig.text(0.05, 0.95, title, fontproperties=fp, fontsize=22, weight='bold', color='#1a237e')
         fig.text(0.05, 0.92, sub, fontproperties=fp, fontsize=12, color='gray')
 
-        # ------------------------------------------------
-        # ① 左上: ポテンシャル評価 (VO2Max & 予測)
-        # ------------------------------------------------
+        # ① 左上: ポテンシャル評価
         ax1 = fig.add_axes([0.05, 0.60, 0.40, 0.25])
         ax1.set_axis_off()
         ax1.set_title("① 基礎走力からのポテンシャル分析", fontproperties=fp, loc='left', color='#0d47a1', fontsize=14, weight='bold')
@@ -165,9 +181,7 @@ class ReportGenerator:
                 
         ax1.text(0.0, 0.85, eval_text, fontproperties=fp, fontsize=11, va='top', linespacing=1.6)
 
-        # ------------------------------------------------
-        # ② 右上: 実走ラップデータ (あれば表示)
-        # ------------------------------------------------
+        # ② 右上: 実走ラップデータ
         ax2 = fig.add_axes([0.50, 0.60, 0.45, 0.25])
         ax2.set_axis_off()
         ax2.set_title(f"② {engine.target_dist}m 実走データ", fontproperties=fp, loc='left', color='#0d47a1', fontsize=14, weight='bold')
@@ -187,32 +201,16 @@ class ReportGenerator:
         else:
             ax2.text(0.1, 0.5, "※3000m/2100mの実走データが\n読み取れませんでした。", fontproperties=fp, fontsize=12)
 
-        # ------------------------------------------------
-        # ③ 左下: 目標通過タイム表 (ポテンシャルから算出)
-        # ------------------------------------------------
+        # ③ 左下: 目標通過タイム表
         ax3 = fig.add_axes([0.05, 0.10, 0.40, 0.40])
         ax3.set_axis_off()
         ax3.set_title("③ 能力別：目標ラップ表", fontproperties=fp, loc='left', color='#0d47a1', fontsize=14, weight='bold')
         
         if potential_sec:
-            # 基準ペース（理論限界）
-            base_pace = potential_sec / (engine.target_dist / 300) # 300mトラック換算の1周
-            
-            # 4段階設定
-            # Level 1: 安全圏 (理論値の90%強度)
-            # Level 2: 挑戦圏 (理論値の95%強度)
-            # Level 3: 理論限界 (100%)
-            # Level 4: 限界突破 (102%)
-            
+            base_pace = potential_sec / (engine.target_dist / 300) 
             headers = ["レベル", "目標タイム", "1周(300m)ペース"]
             rows = []
-            levels = [
-                ("安全圏", 1.10), 
-                ("挑戦圏", 1.05), 
-                ("理論値", 1.00), 
-                ("限界突破", 0.98)
-            ]
-            
+            levels = [("安全圏", 1.10), ("挑戦圏", 1.05), ("理論値", 1.00), ("限界突破", 0.98)]
             for label, ratio in levels:
                 target_sec = potential_sec * ratio
                 lap_pace = base_pace * ratio
@@ -225,44 +223,33 @@ class ReportGenerator:
         else:
             ax3.text(0.1, 0.5, "15分走データがないため算出不能", fontproperties=fp)
 
-        # ------------------------------------------------
-        # ④ 右下: 実戦アドバイス (実走データとの比較)
-        # ------------------------------------------------
+        # ④ 右下: 実戦アドバイス
         ax4 = fig.add_axes([0.50, 0.10, 0.45, 0.40])
         ax4.set_axis_off()
         ax4.set_title("④ コーチからの戦術アドバイス", fontproperties=fp, loc='left', color='#0d47a1', fontsize=14, weight='bold')
         
         advice = ""
         if len(engine.tt_laps) > 0 and potential_sec:
-            # AT値判定
             at_point = next((i+1 for i in range(1, len(engine.tt_laps)) if engine.tt_laps[i] - engine.tt_laps[i-1] >= 3.0), None)
-            
-            # 理論ラップ
             theory_lap = potential_sec / len(engine.tt_laps)
             
             advice += f"【現状の課題】\n"
-            if at_point:
-                advice += f"{at_point}周目にAT値（スタミナ切れ）が来ています。\n"
+            if at_point: advice += f"{at_point}周目にAT値（スタミナ切れ）が来ています。\n"
             advice += f"あなたの心肺機能なら、1周{theory_lap:.1f}秒で押していけるはずです。\n"
             
-            # 前半と後半の比較
             half = len(engine.tt_laps) // 2
             first_half = np.mean(engine.tt_laps[:half])
-            second_half = np.mean(engine.tt_laps[half:])
-            
             advice += "\n【次回の戦術】\n"
             if first_half < theory_lap - 2:
                 advice += "今回は「入り」が速すぎました。\n最初の3周を意識的に抑えれば、後半の失速を防げます。\n"
             else:
                 advice += "イーブンペースを意識して、中盤の粘りを強化しましょう。\n"
-            
             advice += f"\n👉 左の表の『理論値』のラップを参考に\nペースメイクしてください。"
         elif potential_sec:
             advice += "実走データがありませんが、左の表があなたの目安です。\nまずは『安全圏』のペースで完走を目指しましょう。"
         else:
             advice += "データ不足のためアドバイスを作成できません。"
 
-        # 枠線
         rect = plt.Rectangle((0, 0), 1, 1, fill=False, edgecolor='#333', linewidth=1, transform=ax4.transAxes)
         ax4.add_patch(rect)
         ax4.text(0.05, 0.9, advice, fontproperties=fp, fontsize=11, va='top', linespacing=1.6)
