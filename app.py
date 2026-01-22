@@ -13,12 +13,12 @@ import base64
 from PIL import Image, ImageOps
 
 # ==========================================
-# 設定：新しいAPIキー (更新済み)
+# 設定：新しいAPIキー
 # ==========================================
 API_KEY = "AIzaSyBk5RvAlljh3UbdoXUUn941_w0pOrsSgKc"
 
 # ==========================================
-# 0. 日本語フォント設定 (自給自足版)
+# 0. 日本語フォント設定
 # ==========================================
 def setup_japanese_font():
     font_path = "NotoSansJP-Regular.ttf"
@@ -32,18 +32,17 @@ def setup_japanese_font():
         pass
 
 # ==========================================
-# 1. AI読み取りエンジン (直通電話版)
+# 1. AI読み取りエンジン (モデル名修正版)
 # ==========================================
 def analyze_image_with_direct_api(img_bytes):
     # 画像を文字データ(Base64)に変換
     base64_data = base64.b64encode(img_bytes).decode('utf-8')
     
-    # 直通アドレス (Gemini 1.5 Flash)
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={API_KEY}"
+    # ★修正点: モデル名を 'gemini-1.5-flash-latest' に変更して特定
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={API_KEY}"
     
     headers = {'Content-Type': 'application/json'}
     
-    # AIへの命令文
     prompt_text = """
     持久走の記録用紙を読み取ってください。
     
@@ -52,11 +51,10 @@ def analyze_image_with_direct_api(img_bytes):
     - 名前、性別("男子"or"女子")、完走距離(m)、全ラップタイム(秒)を抽出。
     - 分秒表記(1'20)は秒(80)に変換。
     
-    回答は以下のJSON形式のみで出力してください。Markdownなどの装飾は不要です。
+    回答は以下のJSON形式のみで出力してください。
     {"name": "名前", "gender": "男子", "distances": [3000], "laps": [70, 72]}
     """
     
-    # データパック作成
     payload = {
         "contents": [{
             "parts": [
@@ -67,21 +65,17 @@ def analyze_image_with_direct_api(img_bytes):
     }
     
     try:
-        # 直通電話をかける (POST送信)
         response = requests.post(url, headers=headers, json=payload)
         result = response.json()
         
-        # エラーチェック
+        # エラーハンドリング
         if "error" in result:
             return None, f"AIエラー: {result['error']['message']}"
             
         if 'candidates' not in result:
-             return None, "解析できませんでした。画像が鮮明か確認してください。"
+             return None, "解析できませんでした。"
 
-        # 答えを取り出す
         text = result['candidates'][0]['content']['parts'][0]['text']
-        
-        # JSON部分を探す
         json_match = re.search(r'\{.*\}', text, re.DOTALL)
         if json_match:
             return json.loads(json_match.group(0)), None
@@ -204,7 +198,7 @@ def main():
                         st.image(img_buf, use_column_width=True)
                         st.markdown("画像を長押しで保存できます")
                     else:
-                        st.error("レポート生成に失敗しました")
+                        st.error("レポート生成エラー")
                 else:
                     st.error(error)
             except Exception as e:
