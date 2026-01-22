@@ -13,7 +13,7 @@ import base64
 from PIL import Image, ImageOps
 
 # ==========================================
-# 設定：APIキー (確認済み)
+# 設定：APIキー (2026/01/22 更新)
 # ==========================================
 API_KEY = "AIzaSyBk5RvAlljh3UbdoXUUn941_w0pOrsSgKc"
 
@@ -32,21 +32,53 @@ def setup_japanese_font():
         pass
 
 # ==========================================
-# 1. AI読み取りエンジン (最強のリトライ機能付き)
+# 1. 自動モデル検出 & AI読み取りエンジン
 # ==========================================
-def analyze_image_with_direct_api(img_bytes):
+def get_valid_model_name():
+    """Googleのサーバーに問い合わせて、現在使用可能なモデル名を取得する"""
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={API_KEY}"
+    try:
+        response = requests.get(url)
+        data = response.json()
+        
+        if "error" in data:
+            return None, f"APIキーエラー: {data['error']['message']}"
+            
+        # 使えるモデルを探す（Flash優先）
+        available_models = []
+        if 'models' in data:
+            for m in data['models']:
+                # 画像認識(generateContent)に対応しているか確認
+                if 'supportedGenerationMethods' in m and 'generateContent' in m['supportedGenerationMethods']:
+                    available_models.append(m['name'])
+        
+        if not available_models:
+            return None, "使用可能なモデルが見つかりませんでした。"
+
+        # 優先順位: 1.5-flash -> 1.5-pro -> 1.0-pro -> その他
+        for m in available_models:
+            if "gemini-1.5-flash" in m: return m, None
+        for m in available_models:
+            if "gemini-1.5-pro" in m: return m, None
+        for m in available_models:
+            if "gemini-pro" in m: return m, None
+            
+        return available_models[0], None # とにかく最初に見つかったやつを使う
+        
+    except Exception as e:
+        return None, f"通信エラー(モデル一覧取得失敗): {e}"
+
+def analyze_image_with_auto_model(img_bytes):
+    # まず、使えるモデルを自動検出
+    model_name, error = get_valid_model_name()
+    if not model_name:
+        return None, error
+
+    # 検出されたモデルを使って分析
     base64_data = base64.b64encode(img_bytes).decode('utf-8')
+    url = f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent?key={API_KEY}"
     
-    # ★ここが最強の修正点:
-    # どれか一つでも繋がればOK！上から順にドアをノックしに行きます。
-    models_to_try = [
-        "gemini-1.5-flash",          # 基本
-        "gemini-1.5-flash-001",      # バージョン固定
-        "gemini-1.5-flash-latest",   # 最新
-        "gemini-1.5-pro",            # 高性能版
-        "gemini-1.5-pro-001"         # 高性能固定
-    ]
-    
+    headers = {'Content-Type': 'application/json'}
     prompt_text = """
     持久走の記録用紙を読み取ってください。
     
@@ -68,40 +100,23 @@ def analyze_image_with_direct_api(img_bytes):
         }]
     }
     
-    headers = {'Content-Type': 'application/json'}
-    last_error = ""
-    
-    # ループ処理：つながるモデルが見つかるまで試す
-    for model_name in models_to_try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={API_KEY}"
-        try:
-            # print(f"Testing model: {model_name}...") # デバッグ用
-            response = requests.post(url, headers=headers, json=payload)
-            result = response.json()
+    try:
+        response = requests.post(url, headers=headers, json=payload)
+        result = response.json()
+        
+        if "error" in result:
+            return None, f"AIエラー({model_name}): {result['error']['message']}"
             
-            # エラーがあれば次へ
-            if "error" in result:
-                error_msg = result['error']['message']
-                # 「見つからない(Not Found)」系のエラーなら次を試す
-                if "not found" in error_msg.lower() or "supported" in error_msg.lower():
-                    last_error = f"{model_name} NG: {error_msg}"
-                    continue
-                else:
-                    # 認証エラーなどは即終了
-                    return None, f"AIエラー: {error_msg}" 
+        if 'candidates' in result:
+            text = result['candidates'][0]['content']['parts'][0]['text']
+            json_match = re.search(r'\{.*\}', text, re.DOTALL)
+            if json_match:
+                return json.loads(json_match.group(0)), None
+        
+        return None, "データを読み取れませんでした。"
             
-            # 成功したらデータを返す
-            if 'candidates' in result:
-                text = result['candidates'][0]['content']['parts'][0]['text']
-                json_match = re.search(r'\{.*\}', text, re.DOTALL)
-                if json_match:
-                    return json.loads(json_match.group(0)), None
-            
-        except Exception as e:
-            last_error = str(e)
-            continue
-
-    return None, f"全てのモデルで失敗しました。最後のエラー: {last_error}"
+    except Exception as e:
+        return None, f"通信エラー: {e}"
 
 # ==========================================
 # 2. 分析ロジック
@@ -137,7 +152,7 @@ class ScienceEngine:
         return advice, at_point
 
 # ==========================================
-# 3. レポート描画 (ここが途切れていた部分です！)
+# 3. レポート描画
 # ==========================================
 class ReportGenerator:
     @staticmethod
@@ -152,7 +167,6 @@ class ReportGenerator:
             if isinstance(laps, str): laps = [float(x) for x in re.findall(r"[\d\.]+", laps)]
             dists = data.get("distances", [3000])
             if isinstance(dists, str): dists = [float(x) for x in re.findall(r"[\d\.]+", dists)]
-            # ★ここから補完
             total_dist = max(dists) if dists else 3000
         except: return None
 
@@ -160,13 +174,10 @@ class ReportGenerator:
         engine = ScienceEngine(gender)
         advice, at_point = engine.analyze(laps, total_dist)
         
-        # A4レイアウト
         fig = plt.figure(figsize=(8.27, 11.69), dpi=100, facecolor='white')
         plt.axis('off')
-        
         fig.text(0.5, 0.95, f"{name}さんの分析レポート", fontsize=24, ha='center', weight='bold')
         
-        # サマリ
         ax1 = fig.add_axes([0.1, 0.78, 0.8, 0.12])
         ax1.set_axis_off()
         ax1.add_patch(plt.Rectangle((0,0),1,1,color='#E6F3FF', transform=ax1.transAxes))
@@ -174,7 +185,6 @@ class ReportGenerator:
         summary = f"距離: {total_dist}m   タイム: {int(m)}分{int(s):02d}秒"
         ax1.text(0.5, 0.5, summary, fontsize=18, ha='center', va='center')
 
-        # グラフ
         ax2 = fig.add_axes([0.1, 0.45, 0.8, 0.30])
         ax2.plot(range(1, len(laps)+1), laps, marker='o', linewidth=3, color='#FF6B6B')
         ax2.set_title("ラップ推移")
@@ -183,7 +193,6 @@ class ReportGenerator:
             ax2.axvline(x=at_point, color='blue', linestyle='--', label='AT値')
             ax2.legend()
 
-        # アドバイス
         ax3 = fig.add_axes([0.1, 0.10, 0.8, 0.30])
         ax3.set_axis_off()
         ax3.add_patch(plt.Rectangle((0,0),1,1,fill=False, edgecolor='#333', linewidth=2, transform=ax3.transAxes))
@@ -196,31 +205,31 @@ class ReportGenerator:
         return buf
 
 # ==========================================
-# 4. アプリUI (メイン処理)
+# 4. アプリUI
 # ==========================================
 def main():
     st.set_page_config(page_title="持久走分析", layout="centered")
     st.title("🏃‍♂️ 持久走分析アプリ")
-    st.write("記録用紙を撮影してアップロードしてください。")
+    st.write("記録用紙を撮影してください。AIが最適なモデルを自動選択して解析します。")
     
     uploaded_file = st.file_uploader("カメラ起動", type=['png', 'jpg', 'jpeg'])
 
     if uploaded_file:
-        with st.spinner("AIが複数のモデルで解析を試みています..."):
+        with st.spinner("AIモデルを検索中..."):
             try:
                 # 画像処理
                 image = Image.open(uploaded_file)
                 image = ImageOps.exif_transpose(image)
                 st.image(image, caption="送信画像", width=200)
                 
-                # JPEG変換 (エラー回避)
+                # JPEG変換
                 img_byte_arr = io.BytesIO()
                 image = image.convert('RGB')
                 image.save(img_byte_arr, format='JPEG')
                 img_bytes = img_byte_arr.getvalue()
                 
-                # 解析実行
-                data, error = analyze_image_with_direct_api(img_bytes)
+                # 自動検出 & 解析実行
+                data, error = analyze_image_with_auto_model(img_bytes)
                 
                 if data:
                     img_buf = ReportGenerator.create_image(data)
