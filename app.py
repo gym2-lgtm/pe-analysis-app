@@ -2,12 +2,14 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import japanize_matplotlib
 import io
 import google.generativeai as genai
 from PIL import Image, ImageOps
 import json
 import re
+import os
+import matplotlib.font_manager as fm
+import urllib.request
 
 # ==========================================
 # 設定：APIキー
@@ -15,11 +17,29 @@ import re
 API_KEY = "AIzaSyATM7vIfyhj6vKsZga3fydYLHvAMRVNdzg"
 
 # ==========================================
-# 1. AI読み取りエンジン (Gemini 1.5 Flash版)
+# 0. 日本語フォント設定 (japanize-matplotlibの代わり)
+# ==========================================
+def setup_japanese_font():
+    # 日本語フォント(NotoSansJP)をダウンロードして適用する
+    font_path = "NotoSansJP-Regular.ttf"
+    font_url = "https://github.com/google/fonts/raw/main/ofl/notosansjp/NotoSansJP-Regular.ttf"
+    
+    try:
+        if not os.path.exists(font_path):
+            with st.spinner("日本語フォントを準備中..."):
+                urllib.request.urlretrieve(font_url, font_path)
+        
+        fm.fontManager.addfont(font_path)
+        plt.rcParams['font.family'] = 'Noto Sans JP'
+    except Exception as e:
+        # 失敗したら英語フォントのまま進める（エラーで止まるよりマシ）
+        st.warning(f"フォント設定エラー: {e}")
+
+# ==========================================
+# 1. AI読み取りエンジン
 # ==========================================
 def analyze_image_with_gemini(img_obj):
     genai.configure(api_key=API_KEY)
-    # ★ここを現役モデルに戻しました
     model = genai.GenerativeModel('gemini-1.5-flash')
     
     prompt = """
@@ -90,6 +110,8 @@ class ReportGenerator:
     @staticmethod
     def create_image(data):
         plt.close('all')
+        setup_japanese_font() # ★ここでフォント設定を実行
+        
         try:
             name = data.get("name", "あなた")
             gender = data.get("gender", "男子")
@@ -141,12 +163,11 @@ def main():
         with st.spinner("AI分析中..."):
             try:
                 image = Image.open(uploaded_file)
-                image = ImageOps.exif_transpose(image) # 回転直し
+                image = ImageOps.exif_transpose(image)
                 st.image(image, caption="送信画像", width=200)
                 
                 data, error = analyze_image_with_gemini(image)
                 if data:
-                    japanize_matplotlib.japanize()
                     img_buf = ReportGenerator.create_image(data)
                     if img_buf:
                         st.image(img_buf, use_column_width=True)
