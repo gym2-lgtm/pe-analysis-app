@@ -3,3 +3,4 @@ pandas
 numpy
 matplotlib
 japanize-matplotlib
+google-generativeai
