@@ -13,9 +13,10 @@ import base64
 from PIL import Image, ImageOps
 
 # ==========================================
-# 設定：APIキー (2026/01/22 更新)
+# 設定：APIキー
 # ==========================================
-API_KEY = "AIzaSyBk5RvAlljh3UbdoXUUn941_w0pOrsSgKc"
+# ★重要★ 下の " " の中に、新しく作ったキーを貼り付けてください
+API_KEY = "AIzaSyDp28clH2pk_FgQELSQJSEtssPa25WaZ74" 
 
 # ==========================================
 # 0. 日本語フォント設定
@@ -44,37 +45,33 @@ def get_valid_model_name():
         if "error" in data:
             return None, f"APIキーエラー: {data['error']['message']}"
             
-        # 使えるモデルを探す（Flash優先）
         available_models = []
         if 'models' in data:
             for m in data['models']:
-                # 画像認識(generateContent)に対応しているか確認
                 if 'supportedGenerationMethods' in m and 'generateContent' in m['supportedGenerationMethods']:
                     available_models.append(m['name'])
         
         if not available_models:
             return None, "使用可能なモデルが見つかりませんでした。"
 
-        # 優先順位: 1.5-flash -> 1.5-pro -> 1.0-pro -> その他
+        # 優先順位: Flash -> Pro -> その他
         for m in available_models:
             if "gemini-1.5-flash" in m: return m, None
         for m in available_models:
             if "gemini-1.5-pro" in m: return m, None
-        for m in available_models:
-            if "gemini-pro" in m: return m, None
             
-        return available_models[0], None # とにかく最初に見つかったやつを使う
+        return available_models[0], None
         
     except Exception as e:
         return None, f"通信エラー(モデル一覧取得失敗): {e}"
 
 def analyze_image_with_auto_model(img_bytes):
-    # まず、使えるモデルを自動検出
+    # 自動検出
     model_name, error = get_valid_model_name()
     if not model_name:
         return None, error
 
-    # 検出されたモデルを使って分析
+    # 解析実行
     base64_data = base64.b64encode(img_bytes).decode('utf-8')
     url = f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent?key={API_KEY}"
     
