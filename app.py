@@ -87,7 +87,7 @@ def run_ai_analysis(image_obj):
          "distance": 3000,
          "time": "10:30" (なければ null)
       },
-      "coach_advice": "15分/12分間走の推移（成長度）と、ラップタイムの落ち込み(AT閾値)に着目した専門的なアドバイス。150文字程度。"
+      "coach_advice": "記録の推移と、ラップタイムの変動（AT閾値など）に着目した専門的なアドバイス。150文字程度。"
     }
     """
 
@@ -98,7 +98,7 @@ def run_ai_analysis(image_obj):
         return None, f"解析エラー: {e}"
 
 # ==========================================
-# 4. レポート描画（修正版）
+# 4. レポート描画（ベスト記録基準版）
 # ==========================================
 def create_report_image(data):
     fp = load_japanese_font()
@@ -111,12 +111,13 @@ def create_report_image(data):
     tt_rec = data.get("tt_record")
     advice = data.get("coach_advice", "")
     
+    # ★ここを修正：最新ではなく「ベスト記録（最大距離）」を探す
+    best_rec = {"distance": 0, "laps": []}
     if records:
-        latest_rec = records[-1]
-    else:
-        latest_rec = {"distance": 0, "laps": []}
+        # 距離が最大のものを選択
+        best_rec = max(records, key=lambda x: float(x.get("distance", 0)))
         
-    l_dist = float(latest_rec.get("distance", 0))
+    l_dist = float(best_rec.get("distance", 0))
 
     # 論理補正
     base_min = int(data.get("record_type_minutes", 15))
@@ -130,7 +131,7 @@ def create_report_image(data):
     else:
         target_dist = 2100
 
-    # 計算
+    # 計算（ベスト記録に基づく）
     pace_100m = (base_min * 60) / (l_dist / 100) if l_dist > 0 else 0
     pace_1k_sec = pace_100m * 10
     p1k_m = int(pace_1k_sec // 60)
@@ -148,20 +149,19 @@ def create_report_image(data):
     fig.text(0.05, 0.95, "ATHLETE PERFORMANCE REPORT", fontsize=16, color='#666', fontproperties=font_bold)
     fig.text(0.05, 0.90, f"{name} 選手 ｜ 持久走能力徹底分析", fontsize=24, color='#000', fontproperties=font_bold)
 
-    # ① 左上：科学的ポテンシャル
+    # ① 左上：科学的ポテンシャル（ベスト記録ベース）
     ax1 = fig.add_axes([0.05, 0.60, 0.35, 0.25])
     ax1.set_axis_off()
-    # ★修正箇所：boxstyleを削除し、標準的な長方形に修正
     ax1.add_patch(plt.Rectangle((0,0), 1, 1, facecolor='#f8f9fa', edgecolor='#bbb', transform=ax1.transAxes))
 
-    ax1.text(0.05, 0.92, "【① 科学的ポテンシャル診断】", fontsize=14, color='#1565c0', fontproperties=font_bold)
+    ax1.text(0.05, 0.92, "【① 科学的ポテンシャル診断 (Best)】", fontsize=14, color='#1565c0', fontproperties=font_bold)
 
-    info_text = f"● 測定記録 ({base_min}分間走)\n"
+    info_text = f"● 自己ベスト ({base_min}分間走)\n"
     info_text += f"   距離: {int(l_dist)} m\n"
-    info_text += f"● 平均巡航ペース\n"
+    info_text += f"● 最高平均ペース\n"
     info_text += f"   1km換算 : {p1k_m}分{p1k_s:02d}秒 /km\n"
     info_text += f"   (100m換算 : {pace_100m:.1f} 秒)\n"
-    info_text += f"● エンジン性能 (推定VO2Max)\n"
+    info_text += f"● 最大エンジン性能 (推定VO2Max)\n"
     info_text += f"   {vo2_max:.1f} ml/kg/min\n"
     info_text += f"● {target_dist}m 到達目標タイム\n"
     
