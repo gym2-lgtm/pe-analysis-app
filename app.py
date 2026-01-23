@@ -58,13 +58,15 @@ def load_japanese_font():
 # 3. AI解析エンジン
 # ==========================================
 def run_ai_analysis(image_obj):
+    # ★安全策：モデル名を「gemini-1.5-flash」に完全固定
+    # これにより、実験的モデル(2.5など)の回数制限(20回/日)に引っかかる事故を防ぎます。
+    # 1.5-flashなら1日1500回まで無料です。
+    target_model = "gemini-1.5-flash"
+
     try:
-        models = list(genai.list_models())
-        valid = [m.name for m in models if 'generateContent' in m.supported_generation_methods]
-        target = next((m for m in valid if "1.5-flash" in m), next((m for m in valid if "1.5-pro" in m), valid[0]))
-        model = genai.GenerativeModel(target)
+        model = genai.GenerativeModel(target_model)
     except:
-        return None, "AIモデル検索失敗"
+        return None, "モデル設定エラー"
 
     prompt = """
     あなたは陸上長距離の専門分析官です。画像の「持久走記録用紙」からデータを抽出し、JSONで出力してください。
@@ -176,7 +178,6 @@ def create_report_image(data):
     # ----------------------------------------------------
     # ① 左上：科学的ポテンシャル
     # ----------------------------------------------------
-    # 空白行を削除しコンパクト化
     ax1 = fig.add_axes([0.05, 0.66, 0.35, 0.22]) 
     ax1.set_axis_off()
     ax1.add_patch(plt.Rectangle((0,0), 1, 1, facecolor='#f4f6f7', edgecolor='#bdc3c7', transform=ax1.transAxes))
@@ -184,7 +185,7 @@ def create_report_image(data):
 
     tm, ts = divmod(target_sec, 60)
     
-    # ★修正：空白行削除
+    # 空白行削除 & コンパクト化
     lines = [
         f"● 測定記録 ({base_min}分間走)",
         f"   距離: {int(l_dist)} m",
@@ -197,7 +198,6 @@ def create_report_image(data):
         "   (強度を上げて挑む設定)"
     ]
     
-    # コンパクトにするため行間を少し広げて配置
     ax1.text(0.05, 0.82, "\n".join(lines), fontsize=11, va='top', linespacing=1.6, fontproperties=font_main)
 
     # ----------------------------------------------------
@@ -267,7 +267,7 @@ def create_report_image(data):
     # ----------------------------------------------------
     ax3 = fig.add_axes([0.05, 0.05, 0.35, 0.55]) 
     ax3.set_axis_off()
-    # ★修正：タイトルを下に下げて表に近づける (1.01 -> 1.005)
+    # タイトル位置調整 (1.005に下げて接近)
     ax3.text(0, 1.005, f"【③ {target_dist}m 目標ペース】", fontsize=14, color='#2980b9', fontproperties=font_bold)
 
     if target_sec > 0:
@@ -310,12 +310,11 @@ def create_report_image(data):
     ax4.add_patch(plt.Rectangle((0,0), 1, 1, facecolor='#fff9c4', edgecolor='#f1c40f', transform=ax4.transAxes))
     ax4.text(0.02, 0.88, "【④ COACH'S EYE / 専門的アドバイス】", fontsize=13, color='#d35400', fontproperties=font_bold)
     
-    # 改行処理
     clean_advice = advice.replace("。", "。\n")
-    # ★修正：空白行を削除してコンパクトに
+    # 空白行削除
     final_text_raw = f"■ {target_dist}mへの戦略\n{clean_advice}\n■ 生理学的評価\n{vo2_msg}"
     
-    # 30文字折り返し
+    # 30文字改行
     final_text_wrapped = insert_newlines(final_text_raw, length=30)
     
     ax4.text(0.02, 0.80, final_text_wrapped, fontsize=10, va='top', linespacing=1.5, fontproperties=font_main)
