@@ -2,155 +2,106 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import io, requests, json, base64, os, re, time
+import io, requests, json, base64, os, re
 import matplotlib.font_manager as fm
 from PIL import Image, ImageOps
 
 # ---------------------------------------------------------
-# 1. 環境設定とAPIキー処理
+# 1. APIキーの「徹底洗浄」
 # ---------------------------------------------------------
-# Streamlitのキャッシュクリア対策：キー読み込み時に余計な空白を完全除去
 raw_key = st.secrets.get("GEMINI_API_KEY", "")
-API_KEY = raw_key.strip() if raw_key else ""
+# 改行、スペース、全角スペース、ダブルクォート、シングルクォートを全て削除
+API_KEY = str(raw_key).replace("\n", "").replace(" ", "").replace("　", "").replace('"', "").replace("'", "").strip()
 
 # ---------------------------------------------------------
-# 2. フォント管理（Streamlitのキャッシュのクセ対策）
+# 2. フォント設定
 # ---------------------------------------------------------
 @st.cache_resource
 def load_japanese_font():
-    """
-    Streamlit Cloudの共有IPブロックを回避しつつ、フォントを確保する。
-    失敗してもアプリをクラッシュさせない（デフォルトフォントに切り替える）。
-    """
     font_path = "NotoSansJP-Regular.ttf"
-    # 最も安定しているGoogle Fontsの公式RawデータURL
     url = "https://raw.githubusercontent.com/google/fonts/main/ofl/notosansjp/NotoSansJP-Regular.ttf"
-    
     try:
         if not os.path.exists(font_path):
-            # 重要：Streamlit Cloudからのアクセスをブラウザに見せかける
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            }
-            response = requests.get(url, headers=headers, timeout=20)
+            headers = {"User-Agent": "Mozilla/5.0"}
+            response = requests.get(url, headers=headers, timeout=15)
             response.raise_for_status()
             with open(font_path, "wb") as f:
                 f.write(response.content)
-        
         fm.fontManager.addfont(font_path)
         plt.rcParams['font.family'] = 'Noto Sans JP'
         return fm.FontProperties(fname=font_path)
-    except Exception as e:
-        # フォント読み込み失敗は致命傷にしない
+    except:
         return None
 
 # ---------------------------------------------------------
-# 3. AIエンジン（モデル名の自動取得ロジック実装）
+# 3. AI解析エンジン（モデル名固定・シンプル版）
 # ---------------------------------------------------------
-def get_available_model(api_key):
-    """
-    【過去の失敗からの学習】
-    モデル名を決め打ちするとエラーになるため、APIに問い合わせて
-    「現在利用可能で、かつgenerateContentに対応しているモデル」を動的に取得する。
-    """
-    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
-    try:
-        response = requests.get(url, timeout=10)
-        if response.status_code != 200:
-            return None, f"API接続エラー ({response.status_code}): APIキーを確認してください。"
-            
-        data = response.json()
-        if "error" in data:
-            return None, f"API権限エラー: {data['error']['message']}"
-
-        # generateContent (文章・画像生成) ができるモデルだけを抽出
-        candidates = []
-        for m in data.get('models', []):
-            if 'generateContent' in m.get('supportedGenerationMethods', []):
-                # 'models/gemini-pro' -> 'gemini-pro' に整形
-                name = m['name'].replace('models/', '')
-                candidates.append(name)
-        
-        if not candidates:
-            return None, "利用可能なモデルが見つかりませんでした。"
-
-        # 優先順位: 1.5-flash -> flash -> 1.5-pro -> pro -> その他
-        # これにより、API仕様が変わっても「あるもの」を使うようになる
-        for keyword in ["1.5-flash", "flash", "1.5-pro", "pro"]:
-            found = next((c for c in candidates if keyword in c), None)
-            if found:
-                return found, None
-        
-        # 見つからなければリストの先頭を使う
-        return candidates[0], None
-
-    except Exception as e:
-        return None, f"モデルリスト取得失敗: {str(e)}"
-
 def run_ai_analysis(img_bytes):
     if not API_KEY:
-        return None, "APIキー未設定エラー"
+        return None, "APIキーが設定されていません。Secretsを確認してください。"
 
-    # ① モデル名を動的に決定（これが今回の重要修正）
-    target_model, error = get_available_model(API_KEY)
-    if error:
-        return None, error
-
-    # ② 画像処理
+    # 画像をBase64変換
     b64_image = base64.b64encode(img_bytes).decode()
 
-    # ③ プロンプト
+    # ★修正点：存在しない「2.5」などは使わず、安定版「1.5-flash」を固定で使う
+    target_model = "gemini-1.5-flash"
+
+    # プロンプト
     prompt = """
-    あなたは陸上競技のデータ記録システムです。
-    画像（持久走記録用紙）からデータを読み取り、JSONデータのみを出力してください。
+    以下の持久走記録用紙の画像を読み取り、JSONデータのみを出力してください。
     
-    【抽出ルール】
-    1. "name": 選手名（不明なら"選手"）
+    【抽出項目】
+    1. "name": 名前（読めなければ"選手"）
     2. "long_run_dist": 上段の距離(m)。数値のみ。
     3. "tt_laps": 下段のラップタイム(秒)の数値リスト。
-    
-    【厳守事項】
-    - 出力はJSON形式のみ。Markdown(```json)や挨拶は一切禁止。
-    - 必ず単一のJSONオブジェクトを返すこと。
+
+    【厳守】
+    JSON以外の文字（```json や 解説）は一切書かないでください。
     """
 
-    url = f"[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/){target_model}:generateContent?key={API_KEY}"
+    # URLの生成（余計な文字が入らないように慎重に作成）
+    url = f"[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/){target_model}:generateContent"
     
-    payload = {
+    # APIキーはクエリパラメータではなくヘッダーに埋め込む（エラー回避の鉄則）
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": API_KEY
+    }
+    
+    data_body = {
         "contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "image/jpeg", "data": b64_image}}]}],
-        # JSONモードを強制する設定
-        "generationConfig": {
-            "response_mime_type": "application/json"
-        }
+        "generationConfig": {"response_mime_type": "application/json"}
     }
 
     try:
-        response = requests.post(url, json=payload, timeout=30)
+        # POSTリクエスト
+        response = requests.post(url, headers=headers, json=data_body, timeout=30)
+        
+        # 結果の確認
+        if response.status_code != 200:
+            return None, f"通信エラー ({response.status_code}): {response.text}"
+            
         result = response.json()
         
-        if "error" in result:
-            return None, f"解析エラー: {result['error']['message']}"
+        if "candidates" in result and result["candidates"]:
+            raw_text = result["candidates"][0]["content"]["parts"][0]["text"]
+            # JSONだけを抜き出す
+            match = re.search(r'\{.*\}', raw_text, re.DOTALL)
+            if match:
+                return json.loads(match.group(0)), None
             
-        if 'candidates' in result and result['candidates']:
-            raw_text = result['candidates'][0]['content']['parts'][0]['text']
-            # 念のためJSONとしてパースできるか確認
-            return json.loads(raw_text), None
-            
-        return None, "AIからの応答が空でした。"
+        return None, "AIがデータを読み取れませんでした。"
 
-    except json.JSONDecodeError:
-        return None, "AIの出力が正しいJSON形式ではありませんでした。"
     except Exception as e:
-        return None, f"システム例外: {str(e)}"
+        return None, f"システムエラー: {str(e)}"
 
 # ---------------------------------------------------------
-# 4. レポート作成（Matplotlib）
+# 4. レポート作成
 # ---------------------------------------------------------
 def create_report_image(data):
     fp = load_japanese_font()
     font_arg = {'fontproperties': fp} if fp else {}
     
-    # データ抽出（安全策）
     try: laps = np.array([float(x) for x in data.get("tt_laps", [])])
     except: laps = np.array([])
     try: dist = float(data.get("long_run_dist", 0))
@@ -159,14 +110,13 @@ def create_report_image(data):
 
     target_dist = 3000 if dist > 3200 else 2100
     base_time_min = 15 if target_dist == 3000 else 12
-
+    
     potential_sec = None
     vo2_max = 0
     if dist > 0:
         potential_sec = (base_time_min * 60) * (target_dist / dist)**1.06
         vo2_max = max((dist * (12/base_time_min) - 504.9) / 44.73, 0)
 
-    # 描画
     fig = plt.figure(figsize=(11.69, 8.27), facecolor='white', dpi=100)
     
     # ヘッダー
@@ -236,7 +186,7 @@ def create_report_image(data):
     buf = io.BytesIO(); plt.savefig(buf, format="png", bbox_inches='tight'); return buf
 
 # ---------------------------------------------------------
-# 5. メイン画面 (UI)
+# 5. メインUI
 # ---------------------------------------------------------
 st.set_page_config(page_title="持久走分析", layout="wide")
 st.title("🏃‍♂️ 持久走データ・サイエンス分析")
