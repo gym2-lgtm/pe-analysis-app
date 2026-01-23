@@ -13,6 +13,7 @@ import requests
 # ==========================================
 st.set_page_config(page_title="持久走データサイエンス", layout="wide")
 
+# APIキー設定
 raw_key = st.secrets.get("GEMINI_API_KEY", "")
 API_KEY = str(raw_key).replace("\n", "").replace(" ", "").replace("　", "").replace('"', "").replace("'", "").strip()
 
@@ -53,26 +54,25 @@ def load_japanese_font():
     return None
 
 # ==========================================
-# 3. AI解析エンジン（Area①の精度向上）
+# 3. AI解析エンジン
 # ==========================================
 def run_ai_analysis(image_obj):
     try:
         models = list(genai.list_models())
         valid = [m.name for m in models if 'generateContent' in m.supported_generation_methods]
+        # 1.5系を優先
         target = next((m for m in valid if "1.5-flash" in m), next((m for m in valid if "1.5-pro" in m), valid[0]))
         model = genai.GenerativeModel(target)
     except:
         return None, "AIモデル検索失敗"
 
-    # プロンプト：Area①の数値を正確に取るため、種目（分）の判定を厳密にする
     prompt = """
     あなたは陸上競技の専門分析官です。画像の「持久走記録用紙」からデータを抽出し、JSONで出力してください。
     
     【重要】
     ・用紙には「複数回（1回目, 2回目...）」の記録がある場合があります。全て抽出してください。
     ・種目が「15分間走」か「12分間走」かを用紙から慎重に判断してください。
-    ・もし3000mや2100mのTT記録があればそれも抽出してください。
-
+    
     【JSON構造】
     {
       "name": "選手名",
@@ -82,18 +82,13 @@ def run_ai_analysis(image_obj):
           "attempt": 1,
           "distance": 4050, 
           "laps": [60, 62, 65...] (各周のラップ秒数)
-        },
-        {
-          "attempt": 2,
-          "distance": 4100,
-          "laps": [...] 
         }
       ],
       "tt_record": {
-         "distance": 3000 (または2100),
-         "time": "10:30" (タイム文字列。なければ null)
+         "distance": 3000,
+         "time": "10:30" (なければ null)
       },
-      "coach_advice": "15分/12分間走の推移（成長度）と、ラップタイムの落ち込み(AT閾値)に着目した専門的なアドバイス。TT記録があれば持久力とのバランスも言及。150文字程度。"
+      "coach_advice": "15分/12分間走の推移（成長度）と、ラップタイムの落ち込み(AT閾値)に着目した専門的なアドバイス。150文字程度。"
     }
     """
 
@@ -104,7 +99,7 @@ def run_ai_analysis(image_obj):
         return None, f"解析エラー: {e}"
 
 # ==========================================
-# 4. レポート描画（Area①修正版）
+# 4. レポート描画（修正版）
 # ==========================================
 def create_report_image(data):
     fp = load_japanese_font()
@@ -117,7 +112,6 @@ def create_report_image(data):
     tt_rec = data.get("tt_record")
     advice = data.get("coach_advice", "")
     
-    # 最新記録を取得
     if records:
         latest_rec = records[-1]
     else:
@@ -125,36 +119,30 @@ def create_report_image(data):
         
     l_dist = float(latest_rec.get("distance", 0))
 
-    # ★Area①のロジック修正★
-    # AIが読み取った分数
+    # ★論理補正ロジック★
     base_min = int(data.get("record_type_minutes", 15))
+    
+    # 異常値補正：もし12分間走判定で、ペースが異常に速い（キロ3分15秒切り）場合は15分に補正
+    if l_dist > 0 and base_min == 12:
+        calc_pace_check = (12 * 60) / (l_dist / 100) # 100mあたりの秒数
+        if calc_pace_check < 19.5: # 一般生徒としては速すぎる場合
+            base_min = 15
 
-    # 安全装置: 距離と時間からペースがおかしければ補正する
-    # 例: 4000m走って12分だとキロ3分(100m18秒)を切る。一般生徒なら15分の間違いの可能性大。
-    # 閾値を「キロ3分15秒ペース(100m 19.5秒)」に設定。これより速ければ15分とみなす（安全策）
-    if l_dist > 0:
-        calc_pace_12 = (12 * 60) / (l_dist / 100) # 12分と仮定した時の100mペース
-        if calc_pace_12 < 19.5 and base_min == 12:
-            base_min = 15 # 強制補正
-
-    # ターゲット距離（男子3000, 女子2100）
+    # ターゲット距離
     if base_min == 15:
         target_dist = 3000
     else:
         target_dist = 2100
 
     # 計算
-    # 1. 100mペース
     pace_100m = (base_min * 60) / (l_dist / 100) if l_dist > 0 else 0
-    # 2. 1000mペース（分:秒）
     pace_1k_sec = pace_100m * 10
-    p1k_m, p1k_s = divmod(pace_1k_sec, 60)
+    p1k_m = int(pace_1k_sec // 60)
+    p1k_s = int(pace_1k_sec % 60)
     
-    # 3. VO2Max (12分間走換算距離から算出)
     dist_12min = l_dist * (12 / base_min) if base_min > 0 else 0
     vo2_max = (dist_12min - 504.9) / 44.73 if dist_12min > 504.9 else 0
     
-    # 4. ターゲット予測
     t1_sec = base_min * 60
     pred_sec = t1_sec * (target_dist / l_dist)**1.06 if l_dist > 0 else 0
 
@@ -165,35 +153,22 @@ def create_report_image(data):
     fig.text(0.05, 0.95, "ATHLETE PERFORMANCE REPORT", fontsize=16, color='#666', fontproperties=font_bold)
     fig.text(0.05, 0.90, f"{name} 選手 ｜ 持久走能力徹底分析", fontsize=24, color='#000', fontproperties=font_bold)
 
-    # ------------------------------------------------
-    # ① 左上：科学的ポテンシャル（整理・修正版）
-    # ------------------------------------------------
+    # ① 左上：科学的ポテンシャル
     ax1 = fig.add_axes([0.05, 0.60, 0.35, 0.25])
     ax1.set_axis_off()
-    
-    # 枠線
     ax1.add_patch(plt.Rectangle((0,0), 1, 1, boxstyle='round,pad=0.02', facecolor='#f8f9fa', edgecolor='#bbb', transform=ax1.transAxes))
 
-    # 見出し
     ax1.text(0.05, 0.92, "【① 科学的ポテンシャル診断】", fontsize=14, color='#1565c0', fontproperties=font_bold)
 
-    # コンテンツ整理
-    info_text = ""
-    # 1. 測定結果（根拠）
-    info_text += f"● 測定記録 ({base_min}分間走)\n"
+    info_text = f"● 測定記録 ({base_min}分間走)\n"
     info_text += f"   距離: {int(l_dist)} m\n"
-    
-    # 2. ペース能力（1kmを主、100mを従に）
     info_text += f"● 平均巡航ペース\n"
-    info_text += f"   1km換算 : {int(p1k_m)}分{int(p1k_s):02d}秒 /km\n"
+    info_text += f"   1km換算 : {p1k_m}分{p1k_s:02d}秒 /km\n"
     info_text += f"   (100m換算 : {pace_100m:.1f} 秒)\n"
-
-    # 3. VO2Max
     info_text += f"● エンジン性能 (推定VO2Max)\n"
     info_text += f"   {vo2_max:.1f} ml/kg/min\n"
-
-    # 4. ターゲット予測
     info_text += f"● {target_dist}m 到達目標タイム\n"
+    
     if pred_sec > 0:
         pm, ps = divmod(pred_sec, 60)
         info_text += f"   {int(pm)}分{int(ps):02d}秒"
@@ -202,16 +177,12 @@ def create_report_image(data):
 
     ax1.text(0.08, 0.82, info_text, fontsize=11, va='top', linespacing=1.6, fontproperties=font_main)
 
-
-    # ------------------------------------------------
-    # ② 右上〜右下：精密ラップ解析表（3回分比較）
-    # ------------------------------------------------
+    # ② 右上〜右下：精密ラップ解析表
     ax2 = fig.add_axes([0.42, 0.25, 0.55, 0.60]) 
     ax2.set_axis_off()
     ax2.text(0, 1.01, f"【② {base_min}分間走 ラップ推移 & AT閾値】", fontsize=14, color='#0d47a1', fontproperties=font_bold)
 
     if records:
-        # 1回目、2回目... の列作成
         cols = ["周"]
         for r in records:
             idx = r.get("attempt", "?")
@@ -235,30 +206,26 @@ def create_report_image(data):
                     row.extend(["-", "-"])
             cell_data.append(row)
 
-        # 距離行
         dist_row = ["DIST"]
         for rec in records:
             d = rec.get("distance", "-")
             dist_row.extend([f"{d}m", ""])
         cell_data.append(dist_row)
 
-        # テーブル
         table = ax2.table(cellText=cell_data, colLabels=cols, loc='center', cellLoc='center')
         table.auto_set_font_size(False)
         table.set_fontsize(9)
         table.scale(1, 1.25)
 
-        # デザイン & AT判定
         for (r, c), cell in table.get_celld().items():
             if r == 0:
                 cell.set_facecolor('#263238')
                 cell.set_text_props(color='white')
                 if font_bold: cell.set_text_props(fontproperties=font_bold)
-            elif r == len(cell_data): # 距離行
+            elif r == len(cell_data):
                 cell.set_facecolor('#eceff1')
-                if font_bold: cell.set_text_props(fontproperties=font_bold)
             else:
-                if c > 0 and c % 2 != 0: # Lap列
+                if c > 0 and c % 2 != 0:
                     rec_idx = (c - 1) // 2
                     laps = records[rec_idx].get("laps", [])
                     if r-1 < len(laps):
@@ -266,16 +233,11 @@ def create_report_image(data):
                         if r > 1:
                             prev_lap = laps[r-2]
                             if curr_lap - prev_lap >= AT_THRESHOLD:
-                                cell.set_facecolor('#ffebee') # AT警告色
+                                cell.set_facecolor('#ffebee')
                                 cell.set_text_props(color='#c62828', weight='bold')
-            
-            if font_main and r > 0:
-                # 属性保持のため再設定は最小限に
-                pass
+            if font_main and r > 0: pass
 
-    # ------------------------------------------------
     # ③ 左下：目標ペース配分表
-    # ------------------------------------------------
     ax3 = fig.add_axes([0.05, 0.05, 0.35, 0.50])
     ax3.set_axis_off()
     ax3.text(0, 1.01, f"【③ {target_dist}m 目標ペース】", fontsize=14, color='#0d47a1', fontproperties=font_bold)
@@ -312,9 +274,7 @@ def create_report_image(data):
             elif c == 3:
                 cell.set_facecolor('#e3f2fd')
 
-    # ------------------------------------------------
     # ④ 右下：専門アドバイス
-    # ------------------------------------------------
     ax4 = fig.add_axes([0.42, 0.05, 0.55, 0.15])
     ax4.set_axis_off()
     
@@ -324,4 +284,33 @@ def create_report_image(data):
     ax4.text(0.02, 0.85, "【④ COACH'S EYE / 専門的アドバイス】", fontsize=12, color='#ef6c00', fontproperties=font_bold)
     
     adv_text = advice.replace("。", "。\n")
-    ax4.text(0.02, 0.65, adv_text, fontsize=10, va='top', linespacing=1.5, fontproperties=font_
+    ax4.text(0.02, 0.65, adv_text, fontsize=10, va='top', linespacing=1.5, fontproperties=font_main)
+
+    # 保存
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png", bbox_inches='tight')
+    return buf
+
+# ==========================================
+# 5. メインUI
+# ==========================================
+st.title("Data Science Athlete Report")
+st.write("記録用紙（複数回分記載OK）をアップロードしてください。過去のデータと比較分析します。")
+
+uploaded_file = st.file_uploader("", type=['jpg', 'jpeg', 'png'])
+
+if uploaded_file:
+    with st.spinner("Analyzing..."):
+        try:
+            image = Image.open(uploaded_file)
+            image = ImageOps.exif_transpose(image).convert('RGB')
+            
+            data, err = run_ai_analysis(image)
+            
+            if data:
+                st.success("作成完了")
+                st.image(create_report_image(data), use_column_width=True)
+            else:
+                st.error(f"解析エラー: {err}")
+        except Exception as e:
+            st.error(f"システムエラー: {e}")
