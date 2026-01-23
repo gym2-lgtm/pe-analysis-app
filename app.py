@@ -7,9 +7,9 @@ import matplotlib.font_manager as fm
 from PIL import Image, ImageOps
 
 # ---------------------------------------------------------
-# 1. 設定と準備（改行コード削除機能付き）
+# 1. 設定と準備
 # ---------------------------------------------------------
-# APIキー読み込み時に、改行や空白を自動で削除する安全装置(.strip())を追加
+# 改行コード事故防止：キーの前後の空白を自動削除
 raw_key = st.secrets.get("GEMINI_API_KEY", "")
 API_KEY = raw_key.strip() if raw_key else ""
 
@@ -17,8 +17,7 @@ API_KEY = raw_key.strip() if raw_key else ""
 def load_japanese_font():
     """日本語フォントを確実なソースからダウンロードする"""
     font_path = "NotoSansJP-Regular.ttf"
-    
-    # より確実なURL（raw.githubusercontent.comを使用）
+    # 確実なURL
     url = "https://raw.githubusercontent.com/google/fonts/main/ofl/notosansjp/NotoSansJP-Regular.ttf"
     
     try:
@@ -28,49 +27,68 @@ def load_japanese_font():
             response.raise_for_status()
             with open(font_path, "wb") as f:
                 f.write(response.content)
-        
         fm.fontManager.addfont(font_path)
         plt.rcParams['font.family'] = 'Noto Sans JP'
         return fm.FontProperties(fname=font_path)
-    except Exception as e:
-        # フォント取得失敗時は警告を出し、デフォルトフォントで続行
+    except:
         return None
 
 # ---------------------------------------------------------
-# 2. AI解析エンジン
+# 2. AI解析エンジン（外科手術フィルター付き）
 # ---------------------------------------------------------
+def clean_json_parse(text):
+    """
+    AIが余計な文字（Extra data）をつけてきても、
+    最初の正しいJSONだけを外科手術のように切り出す関数
+    """
+    # まずは単純にJSON抽出を試みる
+    match = re.search(r'\{.*\}', text, re.DOTALL)
+    if not match:
+        return None
+    
+    json_str = match.group(0)
+    
+    try:
+        return json.loads(json_str)
+    except json.JSONDecodeError as e:
+        # ここが今回の対策：もし「Extra data」エラーが出たら
+        if "Extra data" in e.msg:
+            try:
+                # エラーが出た場所(e.pos)で強制的に切断して、もう一度読み込む
+                return json.loads(json_str[:e.pos])
+            except:
+                pass
+        return None
+
 def run_ai_analysis(img_bytes):
     if not API_KEY:
-        return None, "APIキーが設定されていません。Secretsを確認してください。"
+        return None, "APIキー設定エラー: Secretsを確認してください。"
 
     b64_image = base64.b64encode(img_bytes).decode()
 
-    # モデル選定（自動取得に失敗したら固定値を使う安全設計）
+    # モデル自動選定（失敗したらデフォルト使用）
     target_model = "gemini-1.5-flash"
     try:
         models_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={API_KEY}"
         resp = requests.get(models_url, timeout=5)
         if resp.status_code == 200:
-            model_data = resp.json()
-            avail = [m['name'].split('/')[-1] for m in model_data.get('models', []) if 'generateContent' in m.get('supportedGenerationMethods', [])]
-            # Flashモデルを優先検索
-            if avail:
-                target_model = next((m for m in avail if "flash" in m), avail[0])
+            m_data = resp.json()
+            avail = [m['name'].split('/')[-1] for m in m_data.get('models', []) if 'generateContent' in m.get('supportedGenerationMethods', [])]
+            if avail: target_model = next((m for m in avail if "flash" in m), avail[0])
     except:
-        pass # エラーでも気にせずデフォルトモデルで進む
+        pass
 
-    # プロンプト
     prompt = """
     あなたは陸上競技のデータアナリストです。
-    画像から「15分間走(または12分間走)」と「3000m(または2100m)走」の記録を読み取り、JSONデータのみを出力してください。
+    画像から「15分間走(または12分間走)」と「3000m(または2100m)走」の記録を読み取り、JSONのみを出力してください。
     
-    【ルール】
-    - 余計な解説は不要。JSONのみ返す。
-    - 数値は半角数字にする。
+    【厳守】
+    - JSONデータ以外の文字（解説や挨拶）は一文字も書かないでください。
+    - データは必ず1つだけにしてください。
 
     【出力形式】
     {
-      "name": "氏名(読み取れなければ'選手')",
+      "name": "氏名(不明なら'選手')",
       "long_run_dist": 距離の数値(例: 4050)。空欄なら0,
       "tt_laps": [ラップタイム(秒)の数値リスト]
     }
@@ -91,17 +109,22 @@ def run_ai_analysis(img_bytes):
         
         if 'candidates' in result and result['candidates']:
             raw_text = result['candidates'][0]['content']['parts'][0]['text']
-            match = re.search(r'\{.*\}', raw_text, re.DOTALL)
-            if match:
-                return json.loads(match.group(0)), None
+            
+            # ★ここで新開発の「外科手術フィルター」を通す
+            data = clean_json_parse(raw_text)
+            
+            if data:
+                return data, None
+            else:
+                return None, f"データ読み取り失敗: {raw_text[:100]}..."
         
-        return None, "データを読み取れませんでした。"
+        return None, "AIからの応答が空でした。"
             
     except Exception as e:
         return None, f"システムエラー: {str(e)}"
 
 # ---------------------------------------------------------
-# 3. レポート作成（可視化）
+# 3. レポート作成
 # ---------------------------------------------------------
 def create_report_image(data):
     fp = load_japanese_font()
@@ -115,13 +138,12 @@ def create_report_image(data):
 
     target_dist = 3000 if dist > 3200 else 2100
     base_time_min = 15 if target_dist == 3000 else 12
-
+    
+    potential_sec = None
+    vo2_max = 0
     if dist > 0:
         potential_sec = (base_time_min * 60) * (target_dist / dist)**1.06
         vo2_max = max((dist * (12/base_time_min) - 504.9) / 44.73, 0)
-    else:
-        potential_sec = None
-        vo2_max = 0
 
     fig = plt.figure(figsize=(11.69, 8.27), facecolor='white', dpi=100)
     
