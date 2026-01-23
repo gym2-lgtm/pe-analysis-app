@@ -87,7 +87,7 @@ def run_ai_analysis(image_obj):
          "distance": 3000,
          "time": "10:30" (なければ null)
       },
-      "coach_advice": "記録の推移と、ラップタイムの変動（AT閾値など）に着目した専門的なアドバイス。150文字程度。"
+      "coach_advice": "記録の推移と、ラップタイムの変動（AT閾値など）に着目した専門的なアドバイス。120文字程度。"
     }
     """
 
@@ -98,7 +98,7 @@ def run_ai_analysis(image_obj):
         return None, f"解析エラー: {e}"
 
 # ==========================================
-# 4. レポート描画（ベスト記録基準版）
+# 4. レポート描画（完成版）
 # ==========================================
 def create_report_image(data):
     fp = load_japanese_font()
@@ -108,13 +108,11 @@ def create_report_image(data):
     # データ整理
     name = data.get("name", "選手")
     records = data.get("records", [])
-    tt_rec = data.get("tt_record")
     advice = data.get("coach_advice", "")
     
-    # ★ここを修正：最新ではなく「ベスト記録（最大距離）」を探す
+    # ベスト記録の特定
     best_rec = {"distance": 0, "laps": []}
     if records:
-        # 距離が最大のものを選択
         best_rec = max(records, key=lambda x: float(x.get("distance", 0)))
         
     l_dist = float(best_rec.get("distance", 0))
@@ -131,7 +129,7 @@ def create_report_image(data):
     else:
         target_dist = 2100
 
-    # 計算（ベスト記録に基づく）
+    # 計算
     pace_100m = (base_min * 60) / (l_dist / 100) if l_dist > 0 else 0
     pace_1k_sec = pace_100m * 10
     p1k_m = int(pace_1k_sec // 60)
@@ -143,25 +141,42 @@ def create_report_image(data):
     t1_sec = base_min * 60
     pred_sec = t1_sec * (target_dist / l_dist)**1.06 if l_dist > 0 else 0
 
+    # ★VO2Maxに基づく追加コメント生成★
+    vo2_comment = ""
+    if vo2_max >= 62:
+        vo2_comment = f"【VO2Max: {vo2_max:.1f}】\n全国レベルを狙える極めて高い心肺機能です。スピード持久力は既に完成の域にあります。"
+    elif vo2_max >= 55:
+        vo2_comment = f"【VO2Max: {vo2_max:.1f}】\n県大会上位レベルの高い数値です。3000m/2100mでも後半の粘りが期待できます。"
+    elif vo2_max >= 48:
+        vo2_comment = f"【VO2Max: {vo2_max:.1f}】\n長距離ランナーとしての十分な基礎能力があります。スピード練習でさらに伸びます。"
+    else:
+        vo2_comment = f"【VO2Max: {vo2_max:.1f}】\n伸びしろが大きいです。まずは長い距離をゆっくり走り、毛細血管を発達させましょう。"
+
+    # アドバイスに結合
+    final_advice = advice.replace("。", "。\n") + "\n\n" + vo2_comment
+
     # 描画
     fig = plt.figure(figsize=(11.69, 8.27), facecolor='white', dpi=150)
     
     fig.text(0.05, 0.95, "ATHLETE PERFORMANCE REPORT", fontsize=16, color='#666', fontproperties=font_bold)
     fig.text(0.05, 0.90, f"{name} 選手 ｜ 持久走能力徹底分析", fontsize=24, color='#000', fontproperties=font_bold)
 
-    # ① 左上：科学的ポテンシャル（ベスト記録ベース）
-    ax1 = fig.add_axes([0.05, 0.60, 0.35, 0.25])
+    # ----------------------------------------
+    # ① 左上：科学的ポテンシャル
+    # ----------------------------------------
+    # 配置調整：高さを少し縮め、下との間隔を確保
+    ax1 = fig.add_axes([0.05, 0.62, 0.35, 0.23]) 
     ax1.set_axis_off()
     ax1.add_patch(plt.Rectangle((0,0), 1, 1, facecolor='#f8f9fa', edgecolor='#bbb', transform=ax1.transAxes))
 
-    ax1.text(0.05, 0.92, "【① 科学的ポテンシャル診断 (Best)】", fontsize=14, color='#1565c0', fontproperties=font_bold)
+    ax1.text(0.05, 0.90, "【① 科学的ポテンシャル診断 (Best)】", fontsize=14, color='#1565c0', fontproperties=font_bold)
 
-    info_text = f"● 自己ベスト ({base_min}分間走)\n"
+    info_text = f"● 測定記録 ({base_min}分間走)\n"
     info_text += f"   距離: {int(l_dist)} m\n"
     info_text += f"● 最高平均ペース\n"
     info_text += f"   1km換算 : {p1k_m}分{p1k_s:02d}秒 /km\n"
     info_text += f"   (100m換算 : {pace_100m:.1f} 秒)\n"
-    info_text += f"● 最大エンジン性能 (推定VO2Max)\n"
+    info_text += f"● エンジン性能 (推定VO2Max)\n"
     info_text += f"   {vo2_max:.1f} ml/kg/min\n"
     info_text += f"● {target_dist}m 到達目標タイム\n"
     
@@ -171,9 +186,12 @@ def create_report_image(data):
     else:
         info_text += "   算出不能"
 
-    ax1.text(0.08, 0.82, info_text, fontsize=11, va='top', linespacing=1.6, fontproperties=font_main)
+    ax1.text(0.08, 0.78, info_text, fontsize=11, va='top', linespacing=1.6, fontproperties=font_main)
 
-    # ② 右上〜右下：精密ラップ解析表
+    # ----------------------------------------
+    # ② 右側：精密ラップ解析表
+    # ----------------------------------------
+    # 配置調整：右側全体を使う
     ax2 = fig.add_axes([0.42, 0.25, 0.55, 0.60]) 
     ax2.set_axis_off()
     ax2.text(0, 1.01, f"【② {base_min}分間走 ラップ推移 & AT閾値】", fontsize=14, color='#0d47a1', fontproperties=font_bold)
@@ -233,8 +251,11 @@ def create_report_image(data):
                                 cell.set_text_props(color='#c62828', weight='bold')
             if font_main and r > 0: pass
 
+    # ----------------------------------------
     # ③ 左下：目標ペース配分表
-    ax3 = fig.add_axes([0.05, 0.05, 0.35, 0.50])
+    # ----------------------------------------
+    # 配置調整：上部(ax1)との間隔を空けるため、開始位置を下げる
+    ax3 = fig.add_axes([0.05, 0.05, 0.35, 0.48]) 
     ax3.set_axis_off()
     ax3.text(0, 1.01, f"【③ {target_dist}m 目標ペース】", fontsize=14, color='#0d47a1', fontproperties=font_bold)
 
@@ -270,7 +291,9 @@ def create_report_image(data):
             elif c == 3:
                 cell.set_facecolor('#e3f2fd')
 
-    # ④ 右下：専門アドバイス
+    # ----------------------------------------
+    # ④ 右下：専門アドバイス（VO2Max連携）
+    # ----------------------------------------
     ax4 = fig.add_axes([0.42, 0.05, 0.55, 0.15])
     ax4.set_axis_off()
     
@@ -279,8 +302,7 @@ def create_report_image(data):
     
     ax4.text(0.02, 0.85, "【④ COACH'S EYE / 専門的アドバイス】", fontsize=12, color='#ef6c00', fontproperties=font_bold)
     
-    adv_text = advice.replace("。", "。\n")
-    ax4.text(0.02, 0.65, adv_text, fontsize=10, va='top', linespacing=1.5, fontproperties=font_main)
+    ax4.text(0.02, 0.65, final_advice, fontsize=10, va='top', linespacing=1.4, fontproperties=font_main)
 
     # 保存
     buf = io.BytesIO()
