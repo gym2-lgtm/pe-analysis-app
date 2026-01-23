@@ -2,149 +2,125 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import io, requests, json, re, os, base64, time
+import io, requests, json, base64
 import matplotlib.font_manager as fm
 from PIL import Image, ImageOps
 
 # ---------------------------------------------------------
-# 1. 設定と準備
+# 1. 設定：APIキーの読み込み（改行・空白の自動削除機能付き）
 # ---------------------------------------------------------
-# 改行コード事故防止：キーの前後の空白を自動削除
 raw_key = st.secrets.get("GEMINI_API_KEY", "")
+# キーの前後に混入した改行や空白を自動で削除
 API_KEY = raw_key.strip() if raw_key else ""
 
+# ---------------------------------------------------------
+# 2. 設定：日本語フォントの確実な読み込み
+# ---------------------------------------------------------
 @st.cache_resource
 def load_japanese_font():
-    """日本語フォントを確実なソースからダウンロードする"""
     font_path = "NotoSansJP-Regular.ttf"
-    # 確実なURL
+    # Google Fontsの公式・安定版URL
     url = "https://raw.githubusercontent.com/google/fonts/main/ofl/notosansjp/NotoSansJP-Regular.ttf"
     
     try:
         if not os.path.exists(font_path):
-            headers = {"User-Agent": "Mozilla/5.0"}
-            response = requests.get(url, headers=headers, timeout=10)
+            headers = {"User-Agent": "Mozilla/5.0"} # ブラウザとしてアクセス
+            response = requests.get(url, headers=headers, timeout=15)
             response.raise_for_status()
             with open(font_path, "wb") as f:
                 f.write(response.content)
+        
         fm.fontManager.addfont(font_path)
         plt.rcParams['font.family'] = 'Noto Sans JP'
         return fm.FontProperties(fname=font_path)
-    except:
+    except Exception as e:
+        # フォント読み込みに失敗してもアプリを止めない
         return None
 
 # ---------------------------------------------------------
-# 2. AI解析エンジン（外科手術フィルター付き）
+# 3. エンジン：AIによる画像解析
 # ---------------------------------------------------------
-def clean_json_parse(text):
-    """
-    AIが余計な文字（Extra data）をつけてきても、
-    最初の正しいJSONだけを外科手術のように切り出す関数
-    """
-    # まずは単純にJSON抽出を試みる
-    match = re.search(r'\{.*\}', text, re.DOTALL)
-    if not match:
-        return None
-    
-    json_str = match.group(0)
-    
-    try:
-        return json.loads(json_str)
-    except json.JSONDecodeError as e:
-        # ここが今回の対策：もし「Extra data」エラーが出たら
-        if "Extra data" in e.msg:
-            try:
-                # エラーが出た場所(e.pos)で強制的に切断して、もう一度読み込む
-                return json.loads(json_str[:e.pos])
-            except:
-                pass
-        return None
-
 def run_ai_analysis(img_bytes):
     if not API_KEY:
-        return None, "APIキー設定エラー: Secretsを確認してください。"
+        return None, "APIキーが設定されていません。Secretsを確認してください。"
 
+    # 画像をBase64形式（文字列）に変換
     b64_image = base64.b64encode(img_bytes).decode()
 
-    # モデル自動選定（失敗したらデフォルト使用）
-    target_model = "gemini-1.5-flash"
-    try:
-        models_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={API_KEY}"
-        resp = requests.get(models_url, timeout=5)
-        if resp.status_code == 200:
-            m_data = resp.json()
-            avail = [m['name'].split('/')[-1] for m in m_data.get('models', []) if 'generateContent' in m.get('supportedGenerationMethods', [])]
-            if avail: target_model = next((m for m in avail if "flash" in m), avail[0])
-    except:
-        pass
-
+    # 使用するモデル（Flashモデル）
+    model_name = "gemini-1.5-flash"
+    
+    # プロンプト（AIへの命令書）
     prompt = """
-    あなたは陸上競技のデータアナリストです。
-    画像から「15分間走(または12分間走)」と「3000m(または2100m)走」の記録を読み取り、JSONのみを出力してください。
+    この画像の「持久走記録用紙」から、以下のデータを抽出してJSON形式で返してください。
+    
+    【抽出ルール】
+    1. "name": 名前（読み取れなければ "選手"）
+    2. "long_run_dist": 上段の15分間/12分間走の記録(m)。数値のみ。
+    3. "tt_laps": 下段のラップ表のタイム(秒)をリストにする。
     
     【厳守】
-    - JSONデータ以外の文字（解説や挨拶）は一文字も書かないでください。
-    - データは必ず1つだけにしてください。
-
-    【出力形式】
-    {
-      "name": "氏名(不明なら'選手')",
-      "long_run_dist": 距離の数値(例: 4050)。空欄なら0,
-      "tt_laps": [ラップタイム(秒)の数値リスト]
-    }
+    余計なmarkdownタグや解説は不要です。純粋なJSONデータのみを出力してください。
     """
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent?key={API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={API_KEY}"
+    
     payload = {
         "contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "image/jpeg", "data": b64_image}}]}],
-        "generationConfig": {"response_mime_type": "application/json"}
+        # ここで「JSONモード」を強制指定
+        "generationConfig": {
+            "response_mime_type": "application/json",
+            "candidate_count": 1  # 回答は必ず1つだけにする
+        }
     }
 
     try:
         response = requests.post(url, json=payload, timeout=30)
         result = response.json()
         
+        # エラーチェック
         if "error" in result:
-            return None, f"AI解析エラー: {result['error']['message']}"
-        
+            return None, f"Google API Error: {result['error']['message']}"
+            
+        # データの取り出し
         if 'candidates' in result and result['candidates']:
             raw_text = result['candidates'][0]['content']['parts'][0]['text']
+            # 文字列をJSONデータとして変換
+            return json.loads(raw_text), None
             
-            # ★ここで新開発の「外科手術フィルター」を通す
-            data = clean_json_parse(raw_text)
-            
-            if data:
-                return data, None
-            else:
-                return None, f"データ読み取り失敗: {raw_text[:100]}..."
-        
         return None, "AIからの応答が空でした。"
-            
+
+    except json.JSONDecodeError:
+        return None, "データの形式変換に失敗しました。"
     except Exception as e:
         return None, f"システムエラー: {str(e)}"
 
 # ---------------------------------------------------------
-# 3. レポート作成
+# 4. エンジン：レポート画像の作成
 # ---------------------------------------------------------
 def create_report_image(data):
     fp = load_japanese_font()
     font_arg = {'fontproperties': fp} if fp else {}
     
+    # データの整理（エラー防止）
     try: laps = np.array([float(x) for x in data.get("tt_laps", [])])
     except: laps = np.array([])
     try: dist = float(data.get("long_run_dist", 0))
     except: dist = 0.0
     name = data.get("name", "選手")
 
+    # 距離による種目判定（男子3000m / 女子2100m）
     target_dist = 3000 if dist > 3200 else 2100
     base_time_min = 15 if target_dist == 3000 else 12
-    
+
+    # ポテンシャル計算
     potential_sec = None
     vo2_max = 0
     if dist > 0:
         potential_sec = (base_time_min * 60) * (target_dist / dist)**1.06
         vo2_max = max((dist * (12/base_time_min) - 504.9) / 44.73, 0)
 
+    # 用紙設定（A4横）
     fig = plt.figure(figsize=(11.69, 8.27), facecolor='white', dpi=100)
     
     # ヘッダー
@@ -158,9 +134,9 @@ def create_report_image(data):
     if potential_sec:
         m, s = divmod(potential_sec, 60)
         txt += f"■ {target_dist}m 理論限界タイム: {int(m)}分{int(s):02d}秒\n\n"
-        txt += "【AIコーチの評価】\n今のエンジン性能なら、上記のタイムを出せる\nポテンシャルがあります。"
+        txt += "【AIコーチの評価】\nこのエンジンの性能なら、上記のタイムを出せる\nポテンシャルがあります。"
     else:
-        txt += "※基準記録が不足しています。"
+        txt += "※基準記録が読み取れませんでした。"
     ax1.text(0.02, 0.85, txt, fontsize=12, va='top', linespacing=1.8, **font_arg)
     ax1.add_patch(plt.Rectangle((0,0), 1, 1, fill=False, edgecolor='#ddd', transform=ax1.transAxes))
 
@@ -211,10 +187,13 @@ def create_report_image(data):
     ax4.text(0.02, 0.85, adv, fontsize=12, va='top', linespacing=1.6, **font_arg)
     ax4.add_patch(plt.Rectangle((0,0), 1, 1, fill=False, edgecolor='#333', transform=ax4.transAxes))
 
-    buf = io.BytesIO(); plt.savefig(buf, format="png", bbox_inches='tight'); return buf
+    # 画像として保存して返す
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png", bbox_inches='tight')
+    return buf
 
 # ---------------------------------------------------------
-# 4. メインUI
+# 5. メイン画面 (UI)
 # ---------------------------------------------------------
 st.set_page_config(page_title="持久走分析", layout="wide")
 st.title("🏃‍♂️ 持久走データ・サイエンス分析")
@@ -233,8 +212,8 @@ if uploaded_file:
             
             if data:
                 st.success("分析完了！")
-                st.image(create_report_image(data), caption="長押しで保存", use_column_width=True)
+                st.image(create_report_image(data), caption="分析レポート（長押しで保存）", use_column_width=True)
             else:
                 st.error(error_msg)
         except Exception as e:
-            st.error(f"エラー: {e}")
+            st.error(f"予期せぬエラー: {e}")
