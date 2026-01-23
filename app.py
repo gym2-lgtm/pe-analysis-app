@@ -2,186 +2,141 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import io
-import requests
-import json
-import re
-import os
+import io, requests, json, re, os, base64, time
 import matplotlib.font_manager as fm
 import urllib.request
-import base64
-import time
 from PIL import Image, ImageOps
 
-# ==========================================
-# 設定：APIキー
-# ==========================================
-# ★★★ ここに新しいAPIキーを貼り付けてください ★★★
-API_KEY = "AIzaSyB1chpD8a-KlJj81rhuWwRoCmZ2DiR2zeU"
+# --- 1. APIキーの取得 (Secretsから読み込む) ---
+API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 
-# ==========================================
-# 0. 日本語フォント設定
-# ==========================================
+# --- 2. 日本語フォント設定 ---
 @st.cache_resource
-def get_japanese_font_prop():
-    font_filename = "NotoSansJP-Regular.ttf"
-    font_url = "https://github.com/google/fonts/raw/main/ofl/notosansjp/NotoSansJP-Regular.ttf"
-    try:
-        if not os.path.exists(font_filename):
-            urllib.request.urlretrieve(font_url, font_filename)
-        fm.fontManager.addfont(font_filename)
-        plt.rcParams['font.family'] = 'Noto Sans JP'
-        return fm.FontProperties(fname=font_filename)
-    except Exception:
-        return None
+def load_fp():
+    fpath = "NotoSansJP-Regular.ttf"
+    if not os.path.exists(fpath):
+        url = "https://github.com/google/fonts/raw/main/ofl/notosansjp/NotoSansJP-Regular.ttf"
+        urllib.request.urlretrieve(url, fpath)
+    fm.fontManager.addfont(fpath)
+    plt.rcParams['font.family'] = 'Noto Sans JP'
+    return fm.FontProperties(fname=fpath)
 
-# ==========================================
-# 1. AI読み取りエンジン (モデル自動検出機能)
-# ==========================================
-def get_valid_model_name():
-    """Googleのサーバーに問い合わせて、使えるモデル名を自動取得する"""
-    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={API_KEY}"
-    try:
-        response = requests.get(url, timeout=10)
-        data = response.json()
-        
-        if "error" in data:
-            return None, f"キーエラー: {data['error']['message']}"
-            
-        valid_models = []
-        if 'models' in data:
-            for m in data['models']:
-                if 'supportedGenerationMethods' in m and 'generateContent' in m['supportedGenerationMethods']:
-                    name = m['name'].replace('models/', '')
-                    valid_models.append(name)
-        
-        if not valid_models:
-            return None, "使用可能なモデルが見つかりませんでした。"
-
-        # Flash優先、次にPro
-        for m in valid_models:
-            if "flash" in m and "exp" not in m: return m, None
-        for m in valid_models:
-            if "pro" in m and "exp" not in m: return m, None
-            
-        return valid_models[0], None
-        
-    except Exception as e:
-        return None, f"モデル一覧取得エラー: {e}"
-
-def analyze_image(img_bytes):
-    # ステップ1: モデル自動検出
-    model_name, error = get_valid_model_name()
-    if not model_name:
-        return None, error
-
-    # ステップ2: 解析リクエスト
-    base64_data = base64.b64encode(img_bytes).decode('utf-8')
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={API_KEY}"
+# --- 3. AIエンジン ---
+def run_ai(img_bytes):
+    if not API_KEY: return None, "SecretsにGEMINI_API_KEYが設定されていません。"
+    b64 = base64.b64encode(img_bytes).decode()
     
+    try:
+        m_list = requests.get(f"https://generativelanguage.googleapis.com/v1beta/models?key={API_KEY}").json()
+        models = [m['name'].split('/')[-1] for m in m_list.get('models', []) if 'generateContent' in m.get('supportedGenerationMethods', [])]
+        target = next((m for m in models if "1.5-flash" in m), models[0])
+    except: return None, "APIキーが無効、または通信エラーです。"
+
     prompt = """
-    Analyze the running record sheet image.
-    Return JSON ONLY.
-    
-    JSON Structure:
+    Extract running data to JSON. Format:
     {
-      "name": "Student Name (or '選手')",
-      "long_run_dist": 4050,  // Integer (meters) from 15min/12min run section. 0 if empty.
-      "time_trial_laps": [65, 68, 70] // Array of numbers (seconds) from 3000m/2100m section.
+      "name": "Student Name",
+      "long_run_dist": 4050, 
+      "tt_laps": [65.2, 68.0, 70.5]
     }
+    Note: long_run_dist is from the 15/12min section. tt_laps are split seconds from the 3000/2100m section.
     """
-    
-    headers = {'Content-Type': 'application/json'}
-    safety_settings = [
-        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
-    ]
-
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{target}:generateContent?key={API_KEY}"
     payload = {
-        "contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "image/jpeg", "data": base64_data}}]}],
-        "safetySettings": safety_settings
+        "contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "image/jpeg", "data": b64}}]}],
+        "generationConfig": {"response_mime_type": "application/json"},
+        "safetySettings": [{"category": c, "threshold": "BLOCK_NONE"} for c in ["HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH", "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT"]]
     }
-    
     try:
-        res = requests.post(url, headers=headers, json=payload, timeout=30)
-        result_json = res.json()
+        res = requests.post(url, json=payload, timeout=30).json()
+        raw_text = res['candidates'][0]['content']['parts'][0]['text']
+        return json.loads(raw_text), None
+    except Exception as e: return None, f"解析失敗: AIがデータを読み取れませんでした。"
+
+# --- 4. レポート描画 ---
+def draw_report(data):
+    fp = load_fp()
+    laps = np.array([float(l) for l in data.get("tt_laps", [])])
+    dist = float(data.get("long_run_dist", 0))
+    target_d = 3000 if dist > 3200 else 2100
+    long_min = 15 if target_d == 3000 else 12
+    
+    # ポテンシャル推計
+    p_sec = long_min * 60 * (target_d / dist)**1.06 if dist > 0 else None
+    
+    fig = plt.figure(figsize=(11.69, 8.27), facecolor='white')
+    fig.text(0.05, 0.94, f"持久走 科学的分析レポート: {data.get('name','選手')} 選手", fontsize=24, weight='bold', fontproperties=fp, color='#1a237e')
+
+    # ① 左上: 生理学的評価
+    ax1 = fig.add_axes([0.05, 0.55, 0.4, 0.3]); ax1.set_axis_off()
+    ax1.set_title("① 生理学的評価", fontproperties=fp, fontsize=16, loc='left', color='#0d47a1')
+    vo2 = max((dist * (12/long_min) - 504.9) / 44.73, 0) if dist > 0 else 0
+    txt = f"■推定VO2 Max: {vo2:.1f} ml/kg/min\n"
+    if p_sec:
+        txt += f"■{target_d}m 理論限界タイム: {int(p_sec//60)}分{int(p_sec%60):02d}秒\n\n"
+        txt += f"君の心肺機能（エンジン）は非常に強力です。\n今の能力なら{target_d}mをこのタイムで走る\nポテンシャルが十分にあります。"
+    else:
+        txt += "※15分間走の記録が読み取れませんでした。"
+    ax1.text(0, 0.8, txt, fontproperties=fp, fontsize=12, va='top', linespacing=1.8)
+
+    # ② 右上: 周回精密データ
+    ax2 = fig.add_axes([0.5, 0.55, 0.45, 0.3]); ax2.set_axis_off()
+    ax2.set_title("② 周回精密データ (ラップ表)", fontproperties=fp, fontsize=16, loc='left', color='#0d47a1')
+    if len(laps) > 0:
+        rows = [[f"{i+1}周", f"{l:.1f}s", "▲UP" if i>0 and l<laps[i-1]-1.5 else ("▼DN" if i>0 and l>laps[i-1]+2 else "―")] for i, l in enumerate(laps[:12])]
+        tab = ax2.table(cellText=rows, colLabels=["周回", "ラップ", "傾向"], loc='center', cellLoc='center')
+        tab.scale(1, 1.5)
+        for c in tab.get_celld().values(): c.set_text_props(fontproperties=fp)
+
+    # ③ 左下: 目標設定
+    ax3 = fig.add_axes([0.05, 0.1, 0.4, 0.35]); ax3.set_axis_off()
+    ax3.set_title("③ 次回の目標設定ペース", fontproperties=fp, fontsize=16, loc='left', color='#0d47a1')
+    if p_sec:
+        base_l = p_sec / (target_d/300)
+        rows = [
+            ["現状維持", f"{int(p_sec*1.05//60)}:{int(p_sec*1.05%60):02d}", f"{base_l*1.05:.1f}s"],
+            ["挑戦(PB)", f"{int(p_sec//60)}:{int(p_sec%60):02d}", f"{base_l:.1f}s"],
+            ["限界突破", f"{int(p_sec*0.97//60)}:{int(p_sec*0.97%60):02d}", f"{base_l*0.97:.1f}s"]
+        ]
+        tab2 = ax3.table(cellText=rows, colLabels=["レベル", "ゴール", "ラップ"], loc='center', cellLoc='center', colColours=['#fff9c4']*3)
+        tab2.scale(1, 2.5)
+        for c in tab2.get_celld().values(): c.set_text_props(fontproperties=fp)
+    else:
+        ax3.text(0.1, 0.5, "算出用データ不足", fontproperties=fp)
+
+    # ④ 右下: アドバイス（★ここを安全修正しました）
+    ax4 = fig.add_axes([0.5, 0.1, 0.45, 0.35]); ax4.set_axis_off()
+    ax4.set_title("④ 戦術アドバイス", fontproperties=fp, fontsize=16, loc='left', color='#0d47a1')
+    ax4.add_patch(plt.Rectangle((0,0), 1, 1, fill=False, edgecolor='#333'))
+    
+    adv = "分析結果：\n"
+    if p_sec: # データが揃っている場合のみアドバイス生成
+        base_l = p_sec / (target_d/300)
+        at_p = next((i+1 for i in range(1, len(laps)) if laps[i] > laps[i-1]+3), None)
+        if at_p: adv += f"● 第{at_p}周付近でスタミナの限界（AT値）に達しています。\n"
+        adv += "● 序盤の2周を「あえて」1秒抑えて入ることで、\n   後半の失速を防ぐ『ネガティブ・スプリット』が有効です。\n"
+        adv += f"● 次回は1周 {base_l:.1f}秒の刻みを意識しましょう。"
+    else:
+        adv += "15分間走のデータがないため、詳細な戦術分析ができません。\n上段の距離が読み取れているか確認してください。"
         
-        if "error" in result_json:
-            return None, f"APIエラー({model_name}): {result_json['error']['message']}"
-            
-        if 'candidates' in result_json and len(result_json['candidates']) > 0:
-            candidate = result_json['candidates'][0]
-            if candidate.get('finishReason') not in ['STOP', 'MAX_TOKENS', None]:
-                 return None, f"AIブロック: {candidate.get('finishReason')}"
-                 
-            text = candidate['content']['parts'][0]['text']
-            match = re.search(r'\{.*\}', text, re.DOTALL)
-            if match:
-                return json.loads(match.group(0)), None
-            else:
-                return None, "データ形式エラー (JSONが見つかりませんでした)"
+    ax4.text(0.05, 0.85, adv, fontproperties=fp, fontsize=11, va='top', linespacing=1.8)
+
+    buf = io.BytesIO(); plt.savefig(buf, format="png", bbox_inches='tight'); return buf
+
+# --- 5. メインUI ---
+st.set_page_config(layout="wide")
+st.title("🏃‍♂️ 持久走データ・サイエンス分析")
+st.write("15分間(12分間)走と3000m(2100m)の記録から、君のポテンシャルを可視化します。")
+
+file = st.file_uploader("記録用紙の写真をアップロード", type=['jpg','jpeg','png'])
+if file:
+    with st.spinner("AIが科学的データを抽出中..."):
+        img = ImageOps.exif_transpose(Image.open(file)).convert('RGB')
+        buf_img = io.BytesIO(); img.save(buf_img, format='JPEG')
+        data, err = run_ai(buf_img.getvalue())
+        if data:
+            st.success("解析成功！レポートを作成します。")
+            st.image(draw_report(data), use_column_width=True)
+            st.markdown("※画像を長押し、または右クリックで保存して配布できます。")
         else:
-            return None, "AIからの応答がありませんでした"
-
-    except Exception as e:
-        return None, f"通信エラー: {str(e)}"
-
-# ==========================================
-# 2. 科学的分析ロジック
-# ==========================================
-class ScienceEngine:
-    def __init__(self, data):
-        self.name = data.get("name", "選手")
-        try:
-            val = data.get("long_run_dist", 0)
-            self.long_run_dist = float(val) if val is not None else 0
-        except: self.long_run_dist = 0
-        
-        laps = data.get("time_trial_laps", [])
-        if not isinstance(laps, list): laps = []
-        clean_laps = []
-        for x in laps:
-            try: clean_laps.append(float(x))
-            except: pass
-        self.tt_laps = np.array(clean_laps)
-        
-        self.is_male = True if self.long_run_dist > 3200 else False 
-        self.target_dist = 3000 if self.is_male else 2100
-        self.long_run_min = 15 if self.is_male else 12
-
-    def get_potential_time(self):
-        if self.long_run_dist == 0: return None
-        t1 = self.long_run_min * 60
-        d1 = self.long_run_dist
-        d2 = self.target_dist
-        return t1 * (d2 / d1)**1.06
-
-    def get_vo2_max(self):
-        if self.long_run_dist == 0: return 0
-        dist_12min = self.long_run_dist * (12 / self.long_run_min)
-        return max((dist_12min - 504.9) / 44.73, 0)
-
-# ==========================================
-# 3. レポート描画
-# ==========================================
-class ReportGenerator:
-    @staticmethod
-    def create_dashboard(data):
-        plt.close('all')
-        fp = get_japanese_font_prop()
-        font_kwargs = {'fontproperties': fp} if fp else {}
-
-        engine = ScienceEngine(data)
-        potential_sec = engine.get_potential_time()
-        
-        fig = plt.figure(figsize=(11.69, 8.27), dpi=100, facecolor='white')
-        
-        # ヘッダー
-        fig.text(0.05, 0.95, f"科学的分析レポート: {engine.name}", fontsize=22, weight='bold', color='#1a237e', **font_kwargs)
-        fig.text(0.05, 0.92, f"基準: {engine.long_run_min}分間走 {int(engine.long_run_dist)}m", fontsize=12, color='gray', **font_kwargs)
-
-        # ① 左上
-        ax1 = fig.add_axes([0.05, 0.60, 0.40, 0.25])
-        ax1.set_axis_off()
+            st.error(err)
