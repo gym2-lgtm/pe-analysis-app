@@ -24,7 +24,7 @@ if not API_KEY:
 genai.configure(api_key=API_KEY)
 
 # ==========================================
-# 2. フォント設定（3重バックアップ）
+# 2. フォント設定
 # ==========================================
 @st.cache_resource
 def load_japanese_font():
@@ -60,7 +60,6 @@ def run_ai_analysis(image_obj):
     try:
         models = list(genai.list_models())
         valid = [m.name for m in models if 'generateContent' in m.supported_generation_methods]
-        # 1.5系を優先
         target = next((m for m in valid if "1.5-flash" in m), next((m for m in valid if "1.5-pro" in m), valid[0]))
         model = genai.GenerativeModel(target)
     except:
@@ -106,7 +105,7 @@ def create_report_image(data):
     font_main = fp if fp else None
     font_bold = fp if fp else None
 
-    # --- データ整理 ---
+    # データ整理
     name = data.get("name", "選手")
     records = data.get("records", [])
     tt_rec = data.get("tt_record")
@@ -119,16 +118,13 @@ def create_report_image(data):
         
     l_dist = float(latest_rec.get("distance", 0))
 
-    # ★論理補正ロジック★
+    # 論理補正
     base_min = int(data.get("record_type_minutes", 15))
-    
-    # 異常値補正：もし12分間走判定で、ペースが異常に速い（キロ3分15秒切り）場合は15分に補正
     if l_dist > 0 and base_min == 12:
-        calc_pace_check = (12 * 60) / (l_dist / 100) # 100mあたりの秒数
-        if calc_pace_check < 19.5: # 一般生徒としては速すぎる場合
+        calc_pace_check = (12 * 60) / (l_dist / 100) 
+        if calc_pace_check < 19.5: 
             base_min = 15
 
-    # ターゲット距離
     if base_min == 15:
         target_dist = 3000
     else:
@@ -146,17 +142,17 @@ def create_report_image(data):
     t1_sec = base_min * 60
     pred_sec = t1_sec * (target_dist / l_dist)**1.06 if l_dist > 0 else 0
 
-    # --- 描画 ---
+    # 描画
     fig = plt.figure(figsize=(11.69, 8.27), facecolor='white', dpi=150)
     
-    # タイトル
     fig.text(0.05, 0.95, "ATHLETE PERFORMANCE REPORT", fontsize=16, color='#666', fontproperties=font_bold)
     fig.text(0.05, 0.90, f"{name} 選手 ｜ 持久走能力徹底分析", fontsize=24, color='#000', fontproperties=font_bold)
 
     # ① 左上：科学的ポテンシャル
     ax1 = fig.add_axes([0.05, 0.60, 0.35, 0.25])
     ax1.set_axis_off()
-    ax1.add_patch(plt.Rectangle((0,0), 1, 1, boxstyle='round,pad=0.02', facecolor='#f8f9fa', edgecolor='#bbb', transform=ax1.transAxes))
+    # ★修正箇所：boxstyleを削除し、標準的な長方形に修正
+    ax1.add_patch(plt.Rectangle((0,0), 1, 1, facecolor='#f8f9fa', edgecolor='#bbb', transform=ax1.transAxes))
 
     ax1.text(0.05, 0.92, "【① 科学的ポテンシャル診断】", fontsize=14, color='#1565c0', fontproperties=font_bold)
 
