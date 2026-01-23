@@ -6,90 +6,95 @@ import io, json, os, re
 import matplotlib.font_manager as fm
 from PIL import Image, ImageOps
 import google.generativeai as genai
+import requests
 
 # ==========================================
-# 1. システム設定・準備（堅牢性確保）
+# 1. システム設定
 # ==========================================
 st.set_page_config(page_title="持久走データサイエンス", layout="wide")
 
-# APIキーのクリーニング（事故防止）
+# APIキーのクリーニング
 raw_key = st.secrets.get("GEMINI_API_KEY", "")
 API_KEY = str(raw_key).replace("\n", "").replace(" ", "").replace("　", "").replace('"', "").replace("'", "").strip()
 
 if not API_KEY:
-    st.error("【緊急】SecretsにAPIキーが設定されていません。")
+    st.error("SecretsにAPIキーが設定されていません。")
     st.stop()
 
 genai.configure(api_key=API_KEY)
 
-# 日本語フォント（絶対リンク・固定住所）
+# ==========================================
+# 2. フォント設定（3段構えのバックアップ）
+# ==========================================
 @st.cache_resource
 def load_japanese_font():
-    import requests
-    font_path = "NotoSansJP-Regular.ttf"
-    # Google Fontsのコミットハッシュ指定（リンク切れ防止）
-    url = "https://raw.githubusercontent.com/google/fonts/e3082f4d6d660086395b8d23e5959146522c7a52/ofl/notosansjp/NotoSansJP-Regular.ttf"
-    try:
-        if not os.path.exists(font_path):
+    font_filename = "JP_Font.ttf"
+    
+    # 試行するURLリスト（上から順に試す）
+    # 1. Google Fonts (Variable版 - 現在の主流)
+    # 2. Google Fonts (Static版 - バックアップ)
+    # 3. IPAexゴシック (ド定番の予備)
+    url_list = [
+        "https://github.com/google/fonts/raw/main/ofl/notosansjp/NotoSansJP%5Bwght%5D.ttf",
+        "https://raw.githubusercontent.com/google/fonts/main/ofl/notosansjp/NotoSansJP-Regular.ttf",
+        "https://ipafont.ipa.go.jp/IPAexfont/ipaexg00401.ttf"
+    ]
+    
+    if os.path.exists(font_filename):
+        try:
+            fm.fontManager.addfont(font_filename)
+            plt.rcParams['font.family'] = 'Noto Sans JP'
+            return fm.FontProperties(fname=font_filename)
+        except:
+            pass # 壊れていたら再ダウンロード
+
+    # ダウンロード試行ループ
+    for url in url_list:
+        try:
             headers = {"User-Agent": "Mozilla/5.0"}
-            response = requests.get(url, headers=headers, timeout=30)
-            response.raise_for_status()
-            with open(font_path, "wb") as f:
-                f.write(response.content)
-        fm.fontManager.addfont(font_path)
-        plt.rcParams['font.family'] = 'Noto Sans JP'
-        return fm.FontProperties(fname=font_path)
-    except Exception as e:
-        st.warning(f"フォント読み込み警告: {e}")
-        return None
+            response = requests.get(url, headers=headers, timeout=15)
+            if response.status_code == 200:
+                with open(font_filename, "wb") as f:
+                    f.write(response.content)
+                fm.fontManager.addfont(font_filename)
+                # フォント名を特定せずにファイルパスからロードさせる
+                return fm.FontProperties(fname=font_filename)
+        except Exception:
+            continue # 次のURLへ
+
+    return None # 全滅した場合（英語になるがエラーでは止まらない）
 
 # ==========================================
-# 2. AIエンジン（プロコーチの頭脳）
+# 3. AI解析エンジン
 # ==========================================
 def run_ai_analysis(image_obj):
-    # モデル自動探索（利用可能なモデルからベストを選ぶ）
+    # モデル自動探索
     try:
         models = list(genai.list_models())
         valid_models = [m.name for m in models if 'generateContent' in m.supported_generation_methods]
         
-        # 優先順位: 1.5-flash (高速) -> 1.5-pro (高精度) -> その他
-        target_model = next((m for m in valid_models if "1.5-flash" in m.lower()), None)
+        # 優先順位: 1.5-flash -> 1.5-pro
+        target_model = next((m for m in valid_models if "1.5-flash" in m), None)
         if not target_model:
-            target_model = next((m for m in valid_models if "1.5-pro" in m.lower()), None)
-        if not target_model and valid_models:
-            target_model = valid_models[0]
+            target_model = next((m for m in valid_models if "1.5-pro" in m), valid_models[0])
             
-        if not target_model:
-             return None, "利用可能なAIモデルが見つかりませんでした。"
-
         model = genai.GenerativeModel(target_model)
+    except:
+        return None, "AIモデルの検索に失敗しました。"
 
-    except Exception as e:
-        return None, f"モデル選択エラー: {e}"
-
-    # ★ここが魂のプロンプト：AIを「記録員」ではなく「鬼コーチ」にする
+    # プロンプト（IMG_5066のクオリティを目指す）
     prompt = """
-    あなたはオリンピック選手を育てる「陸上長距離の専門分析官」です。
-    アップロードされた「持久走記録用紙」の画像を読み取り、以下の厳密なJSONデータを作成してください。
+    あなたはプロの陸上競技分析官です。画像の「持久走記録用紙」からデータを読み取り、JSONのみ出力してください。
 
-    【分析対象】
-    用紙には「15分間走(または12分間走)」と「3000m(または2100m)のラップタイム」が書かれています。
-
-    【出力JSONフォーマット】
+    【JSON構造】
     {
-      "name": "選手名（読めなければ'選手'）",
-      "long_run_min": 15または12（上段の分数。不明なら15とする）,
-      "long_run_dist": 上段の距離(m)。数値のみ。(例: 4050),
-      "target_dist": 下段の種目距離(m)。男子は3000、女子は2100が多い。(例: 3000),
+      "name": "選手名（不明なら'選手'）",
+      "long_run_min": 15または12（上段の分数。不明なら15）,
+      "long_run_dist": 上段の距離(m)。数値のみ,
+      "target_dist": 下段の種目距離(m)。3000または2100,
       "tt_laps": [ラップタイム(秒)の数値リスト],
-      "coach_comment": "ここには、ラップタイムの変動（中盤の落ち込み、ラストスパートの有無など）を具体的に指摘し、
-                        生理学的な観点（AT値、乳酸の蓄積）と、次回のレースに向けた具体的な戦略（例：前半〇秒抑えるネガティブスプリット）を
-                        150文字程度の『熱い』アドバイスとして書いてください。"
+      "coach_comment": "ここには、ラップの変化（中盤のタレ、ラストスパート等）を指摘し、AT値(無酸素性作業閾値)の観点から次回のペース配分を具体的に提案する150文字程度のアドバイス。"
     }
-
-    【注意】
-    - 余計な解説は不要。JSONのみ出力すること。
-    - 数字は半角。
     """
 
     try:
@@ -97,188 +102,163 @@ def run_ai_analysis(image_obj):
             [prompt, image_obj],
             generation_config={"response_mime_type": "application/json"}
         )
-        
-        # JSONクリーニング
-        text = response.text
-        match = re.search(r'\{.*\}', text, re.DOTALL)
-        if match:
-            return json.loads(match.group(0)), None
-        else:
-            return json.loads(text), None
-
+        return json.loads(response.text), None
     except Exception as e:
         return None, f"解析エラー: {e}"
 
 # ==========================================
-# 3. レポート描画（過去最高傑作を超えるデザイン）
+# 4. レポート描画（IMG_5066完全再現）
 # ==========================================
 def create_report_image(data):
     fp = load_japanese_font()
-    font_bold = {'fontproperties': fp, 'weight': 'bold'} if fp else {}
-    font_reg = {'fontproperties': fp} if fp else {}
-    
-    # --- データ展開 ---
+    # フォントプロパティの設定
+    if fp:
+        font_main = fp
+        font_bold = fp # 太字用ファイルがない場合は同じものを使う
+    else:
+        font_main = None
+        font_bold = None
+
+    # データ展開
     name = data.get("name", "選手")
     l_min = int(data.get("long_run_min", 15))
     l_dist = float(data.get("long_run_dist", 0))
     t_dist = float(data.get("target_dist", 3000))
     laps = np.array([float(x) for x in data.get("tt_laps", [])])
-    comment = data.get("coach_comment", "データ不足のため分析不能")
+    comment = data.get("coach_comment", "")
 
-    # --- 科学的計算 ---
-    # VO2Max推定 (クーパーテストの変形式)
+    # 計算
     dist_12min = l_dist * (12 / l_min) if l_min > 0 else 0
     vo2_max = (dist_12min - 504.9) / 44.73 if dist_12min > 504.9 else 0
-    
-    # ターゲット距離の理論タイム (リーゲルの公式)
     t1_sec = l_min * 60
     pred_sec = t1_sec * (t_dist / l_dist)**1.06 if l_dist > 0 else 0
+
+    # 描画キャンバス
+    fig = plt.figure(figsize=(11.69, 8.27), facecolor='white', dpi=150)
     
-    # --- 描画開始 ---
-    fig = plt.figure(figsize=(11.69, 8.27), facecolor='#f0f2f5', dpi=150) # 背景色を少しグレーに
-    
-    # タイトルエリア
-    fig.text(0.05, 0.95, f"DATA SCIENCE ATHLETE REPORT", fontsize=20, color='#7f8c8d', **font_bold)
-    fig.text(0.05, 0.90, f"{name} 選手｜持久走能力徹底分析", fontsize=28, color='#2c3e50', **font_bold)
-    
-    # ==========================================
-    # エリア①：左上「科学的ポテンシャル評価」
-    # ==========================================
-    ax1 = fig.add_axes([0.05, 0.60, 0.42, 0.25])
+    # --- タイトル ---
+    fig.text(0.05, 0.95, "SCIENTIFIC RUNNING ANALYSIS", fontsize=18, color='#555', fontproperties=font_bold)
+    fig.text(0.05, 0.90, f"{name} 選手｜持久走能力分析レポート", fontsize=26, color='#000', fontproperties=font_bold)
+
+    # --- 左上：科学的データ評価 ---
+    ax1 = fig.add_axes([0.05, 0.55, 0.42, 0.30])
     ax1.set_axis_off()
     
-    # カードデザイン
-    rect = plt.Rectangle((0, 0), 1, 1, facecolor='white', edgecolor='#bdc3c7', linewidth=2, transform=ax1.transAxes)
-    ax1.add_patch(rect)
-    
-    ax1.text(0.05, 0.9, "【生理学的エンジン性能】", fontsize=16, color='#2980b9', **font_bold)
-    
-    info_text = f"● 推定VO2 Max : {vo2_max:.1f} ml/kg/min\n"
-    avg_pace = l_dist/l_min if l_min>0 else 0
-    info_text += f"● {l_min}分間走 平均ペース : {int(avg_pace)} m/分\n"
-    pace_1k = 1000 / avg_pace if avg_pace > 0 else 0
-    info_text += f"● 1000m換算ペース : {int(pace_1k)}分{int((pace_1k%1)*60):02d}秒\n\n"
-    
+    # 評価テキスト
+    info = "【生理学的データ】\n"
+    info += f"● 推定VO2Max : {vo2_max:.1f} ml/kg/min\n"
+    avg_pace_sec = (l_min * 60) / (l_dist/100) if l_dist > 0 else 0
+    info += f"● 100m平均ペース : {avg_pace_sec:.1f} 秒\n"
     if pred_sec > 0:
         pm, ps = divmod(pred_sec, 60)
-        info_text += "【到達可能ポテンシャル】\n"
-        info_text += f"★ {int(t_dist)}m 理論値 : {int(pm)}分{int(ps):02d}秒\n"
-        info_text += "現在の心肺機能は、このタイムを出すための\n出力を既に備えています。"
-    else:
-        info_text += "※基準データ不足のため算出不可"
-        
-    ax1.text(0.05, 0.8, info_text, fontsize=13, va='top', linespacing=1.8, **font_reg)
+        info += f"● {int(t_dist)}m 予測タイム : {int(pm)}分{int(ps):02d}秒\n"
+    
+    info += "\n【専門的評価】\n"
+    if vo2_max > 60: info += "心肺機能は極めて高い水準にあります。\n"
+    elif vo2_max > 50: info += "上位レベルを目指せる十分な心肺機能です。\n"
+    else: info += "基礎的な持久力強化がタイム短縮の鍵です。\n"
+    
+    info += f"予測タイム({int(pm)}:{int(ps):02d})をターゲットに、\nイーブンペースを刻む練習が有効です。"
 
-    # ==========================================
-    # エリア②：右上「精密ラップ解析」
-    # ==========================================
-    ax2 = fig.add_axes([0.50, 0.60, 0.45, 0.25])
+    ax1.text(0.02, 0.95, info, fontsize=12, va='top', linespacing=1.8, fontproperties=font_main)
+    # 枠線
+    ax1.add_patch(plt.Rectangle((0,0),1,1, fill=False, edgecolor='#ccc', transform=ax1.transAxes))
+
+
+    # --- 右上：精密ラップ表 ---
+    ax2 = fig.add_axes([0.50, 0.55, 0.45, 0.30])
     ax2.set_axis_off()
-    ax2.text(0, 1.02, "【実戦ラップ推移】", fontsize=16, color='#2980b9', **font_bold)
+    ax2.text(0, 1.02, f"【{int(t_dist)}m ラップ分析】", fontsize=14, color='#0d47a1', fontproperties=font_bold)
 
     if len(laps) > 0:
-        col_labels = ["周", "LAP(秒)", "通過", "評価"]
+        col_labels = ["周", "LAP", "通過", "評価"]
         cell_data = []
-        cum_time = 0
-        for i, l in enumerate(laps[:15]): # 最大15周
-            cum_time += l
-            cm, cs = divmod(cum_time, 60)
+        cum = 0
+        for i, l in enumerate(laps[:12]):
+            cum += l
+            cm, cs = divmod(cum, 60)
             
-            if i == 0: eval_mark = "―"
-            else:
+            eval_s = "―"
+            if i > 0:
                 diff = l - laps[i-1]
-                if diff > 2.0: eval_mark = "▼DOWN"
-                elif diff < -1.0: eval_mark = "▲UP"
-                else: eval_mark = "KEEP"
+                if diff > 2: eval_s = "▼遅"
+                elif diff < -1: eval_s = "▲速"
+                else: eval_s = "OK"
             
-            cell_data.append([f"{i+1}", f"{l:.1f}", f"{int(cm)}:{int(cs):02d}", eval_mark])
-        
+            cell_data.append([f"{i+1}", f"{l:.1f}", f"{int(cm)}:{int(cs):02d}", eval_s])
+            
         table = ax2.table(cellText=cell_data, colLabels=col_labels, loc='center', cellLoc='center')
         table.auto_set_font_size(False)
-        table.set_fontsize(11)
-        table.scale(1, 1.4)
+        table.set_fontsize(10)
+        table.scale(1, 1.3)
         
-        # デザイン調整
-        for (row, col), cell in table.get_celld().items():
-            if row == 0:
-                cell.set_facecolor('#2c3e50')
+        # 色付け（IMG_5066風の黒ヘッダー）
+        for (r, c), cell in table.get_celld().items():
+            if r == 0:
+                cell.set_facecolor('#222')
                 cell.set_text_props(color='white', weight='bold')
-                if fp: cell.set_text_props(fontproperties=fp, color='white')
-            elif col == 3:
-                if "DOWN" in cell_data[row-1][3]: cell.set_text_props(color='#e74c3c', weight='bold')
-                elif "UP" in cell_data[row-1][3]: cell.set_text_props(color='#27ae60', weight='bold')
+                if font_bold: cell.set_text_props(fontproperties=font_bold, color='white')
+            elif c == 3:
+                if "遅" in cell_data[r-1][3]: cell.set_text_props(color='red', weight='bold')
+                elif "速" in cell_data[r-1][3]: cell.set_text_props(color='blue', weight='bold')
             
-            if fp and row > 0: cell.set_text_props(fontproperties=fp)
+            if font_main and r > 0: cell.set_text_props(fontproperties=font_main)
 
-    # ==========================================
-    # エリア③：左下「目標設定マトリクス」
-    # ==========================================
-    ax3 = fig.add_axes([0.05, 0.05, 0.42, 0.50])
+    # --- 左下：目標ペース表（青い表） ---
+    ax3 = fig.add_axes([0.05, 0.05, 0.42, 0.45])
     ax3.set_axis_off()
-    ax3.text(0, 1.02, "【目標達成ペース配分表】", fontsize=16, color='#2980b9', **font_bold)
+    ax3.text(0, 1.02, "【目標通過タイム表】", fontsize=14, color='#0d47a1', fontproperties=font_bold)
 
     if pred_sec > 0:
-        levels = [
-            ("現状維持", 1.05, "#ecf0f1"),
-            ("自己ベスト", 1.00, "#d6eaf8"),
-            ("県大会レベル", 0.96, "#aed6f1"),
-            ("限界突破", 0.93, "#85c1e9")
-        ]
+        # レベル設定
+        levels = [("維持", 1.05), ("PB更新", 1.00), ("大幅更新", 0.96), ("限界", 0.92)]
+        cols = ["周回"] + [l[0] for l in levels]
         
+        lap_d = 300 # トラック長
         rows_3 = []
-        rows_3.append(["周回", "維持", "PB更新", "上位", "限界"])
         
-        dist_per_lap = 300 # トラック長仮定
-        num_laps = int(t_dist / dist_per_lap)
-
-        target_paces = []
-        for _, factor, _ in levels:
-            target_time = pred_sec * factor
-            pace_per_lap = target_time / num_laps if num_laps > 0 else 0
-            target_paces.append(pace_per_lap)
-
-        for lap_i in range(1, num_laps + 1):
-            row = [f"{lap_i*dist_per_lap}m"]
-            for p in target_paces:
-                cum = p * lap_i
-                cm, cs = divmod(cum, 60)
-                row.append(f"{int(cm)}:{int(cs):02d}")
+        # ヘッダーごとのターゲットタイム(合計)
+        targets = [pred_sec * l[1] for l in levels]
+        
+        for i in range(1, 11): # 10周分
+            row = [f"{i*lap_d}m"]
+            for tgt in targets:
+                # この周回での通過タイム
+                pass_time = tgt * (i*lap_d / t_dist)
+                pm, ps = divmod(pass_time, 60)
+                row.append(f"{int(pm)}:{int(ps):02d}")
             rows_3.append(row)
             
-        table3 = ax3.table(cellText=rows_3, loc='center', cellLoc='center')
+        table3 = ax3.table(cellText=rows_3, colLabels=cols, loc='center', cellLoc='center')
         table3.auto_set_font_size(False)
-        table3.set_fontsize(11)
-        table3.scale(1, 1.8)
+        table3.set_fontsize(10)
+        table3.scale(1, 1.6)
         
-        for (row, col), cell in table3.get_celld().items():
-            if row == 0:
-                cell.set_facecolor('#34495e')
+        # 青系デザイン
+        colors = ["#fff", "#cfd8dc", "#90caf9", "#42a5f5", "#1e88e5"]
+        for (r, c), cell in table3.get_celld().items():
+            if r == 0:
+                cell.set_facecolor('#1565c0')
                 cell.set_text_props(color='white')
-            elif col == 0:
-                cell.set_facecolor('#bdc3c7')
-            
-            if col > 0 and row > 0:
-                cell.set_facecolor(levels[col-1][2])
-                
-            if fp: cell.set_text_props(fontproperties=fp)
-            if row==0 and fp: cell.set_text_props(fontproperties=fp, color='white')
+                if font_bold: cell.set_text_props(fontproperties=font_bold, color='white')
+            elif c == 0:
+                cell.set_facecolor('#eceff1')
+            else:
+                # 列ごとに色を変えるか、シンプルにするか
+                pass
+            if font_main and r>0: cell.set_text_props(fontproperties=font_main)
 
-    # ==========================================
-    # エリア④：右下「戦略的アドバイス」
-    # ==========================================
-    ax4 = fig.add_axes([0.50, 0.05, 0.45, 0.50])
+
+    # --- 右下：戦術アドバイス ---
+    ax4 = fig.add_axes([0.50, 0.05, 0.45, 0.45])
     ax4.set_axis_off()
+    ax4.text(0, 1.02, "【科学的分析と実戦戦術】", fontsize=14, color='#0d47a1', fontproperties=font_bold)
     
-    rect4 = plt.Rectangle((0, 0), 1, 1, facecolor='#fff3e0', edgecolor='#f39c12', linewidth=3, transform=ax4.transAxes)
-    ax4.add_patch(rect4)
+    # 枠
+    ax4.add_patch(plt.Rectangle((0,0), 1, 1, facecolor='white', edgecolor='#333', transform=ax4.transAxes))
     
-    ax4.text(0.05, 0.92, "【COACH'S TACTICAL ADVICE】", fontsize=16, color='#d35400', **font_bold)
-    
-    formatted_comment = ""
-    for line in comment.split("。"):
-        if line and line.strip(): formatted_comment += "▶ " + line.strip() + "。\n\n"
-        
-    ax4.text(0.05, 0.85, formatted_comment, fontsize=13, va='top', linespacing=1.7, **font_reg)
+    clean_comment = comment.replace("。", "。\n\n")
+    ax4.text(0.05, 0.90, clean_comment, fontsize=11, va='top', linespacing=1.6, fontproperties=font_main)
 
     # 保存
     buf = io.BytesIO()
@@ -286,16 +266,15 @@ def create_report_image(data):
     return buf
 
 # ==========================================
-# 4. メインUI
+# 5. メインUI
 # ==========================================
-st.title("🏃‍♂️ DATA SCIENCE ATHLETE ANALYSIS")
-st.markdown("##### 過去の自分を超えるための、プロフェッショナル分析レポート")
-st.write("記録用紙をアップロードしてください。AIがポテンシャルを最大限に引き出すための戦略を提示します。")
+st.title("Data Science Athlete Report")
+st.markdown("記録用紙をアップロードしてください。")
 
 uploaded_file = st.file_uploader("", type=['jpg', 'jpeg', 'png'])
 
 if uploaded_file:
-    with st.spinner("Analyzing performance data..."):
+    with st.spinner("AI分析中..."):
         try:
             image = Image.open(uploaded_file)
             image = ImageOps.exif_transpose(image).convert('RGB')
@@ -303,10 +282,9 @@ if uploaded_file:
             data, err = run_ai_analysis(image)
             
             if data:
-                st.success("Analysis Complete.")
-                st.image(create_report_image(data), caption="分析レポート（長押しで保存）", use_column_width=True)
+                st.success("分析完了")
+                st.image(create_report_image(data), use_column_width=True)
             else:
-                st.error(f"解析エラー: {err}")
-                
+                st.error(f"エラー: {err}")
         except Exception as e:
             st.error(f"システムエラー: {e}")
