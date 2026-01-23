@@ -55,55 +55,18 @@ def load_japanese_font():
     return None
 
 # ==========================================
-# 3. AI解析エンジン（モデル自動在庫確認機能）
+# 3. AI解析エンジン（モデル名完全固定）
 # ==========================================
-def get_available_model_name():
-    """
-    ユーザーのアカウントで「確実に使えるモデル」をGoogleに問い合わせて取得する。
-    """
-    try:
-        # 利用可能な全モデルリストを取得
-        all_models = list(genai.list_models())
-        
-        # 画像認識(generateContent)が使えるモデルだけ抽出
-        valid_models = [m.name for m in all_models if 'generateContent' in m.supported_generation_methods]
-        
-        if not valid_models:
-            return None, "利用可能なモデルが見つかりませんでした。"
-
-        # 優先順位リスト（上から順に、リストに存在すればそれを使う）
-        # 1.5-flash系 -> 1.5-pro系 -> 1.0-pro系
-        priority_keywords = [
-            "gemini-1.5-flash",
-            "gemini-1.5-pro",
-            "gemini-pro",
-            "gemini-1.0-pro"
-        ]
-
-        # 1. 優先リストとの完全一致を探す
-        for kw in priority_keywords:
-            for m in valid_models:
-                if kw in m: # 部分一致でもOKとする（例: models/gemini-1.5-flash-001）
-                    return m, None
-        
-        # 2. 見つからなければ、とにかくリストの先頭を使う
-        return valid_models[0], None
-
-    except Exception as e:
-        # 万が一リスト取得自体に失敗した場合は、最も基本的な名前を返す
-        return "models/gemini-pro", f"モデルリスト取得失敗(デフォルト使用): {e}"
-
 def run_ai_analysis(image_obj):
-    # ★ここで「確実に存在するモデル名」を取得
-    target_model, warning = get_available_model_name()
-    
-    if not target_model:
-        return None, f"AIモデルエラー: {warning}"
+    # ★修正：リスト取得(list_models)を廃止。
+    # 確実に存在する安定版モデル名を直接指定します。
+    # これにより "gemini-2.5-pro" 等の罠モデルを回避します。
+    target_model = "gemini-1.5-flash"
 
     try:
         model = genai.GenerativeModel(target_model)
-    except:
-        return None, f"モデル初期化エラー: {target_model}"
+    except Exception as e:
+        return None, f"モデル設定エラー: {e}"
 
     prompt = """
     あなたは陸上長距離の専門分析官です。画像の「持久走記録用紙」からデータを抽出し、JSONで出力してください。
@@ -132,8 +95,7 @@ def run_ai_analysis(image_obj):
         response = model.generate_content([prompt, image_obj], generation_config={"response_mime_type": "application/json"})
         return json.loads(response.text), None
     except Exception as e:
-        # エラー詳細を表示してデバッグしやすくする
-        return None, f"解析エラー: {e} (Model: {target_model})"
+        return None, f"解析エラー: {e}"
 
 # ==========================================
 # 4. レポート描画（レイアウト完成版）
@@ -223,7 +185,6 @@ def create_report_image(data):
 
     tm, ts = divmod(target_sec, 60)
     
-    # 空白行削除 & コンパクト化
     lines = [
         f"● 測定記録 ({base_min}分間走)",
         f"   距離: {int(l_dist)} m",
@@ -348,10 +309,8 @@ def create_report_image(data):
     ax4.text(0.02, 0.88, "【④ COACH'S EYE / 専門的アドバイス】", fontsize=13, color='#d35400', fontproperties=font_bold)
     
     clean_advice = advice.replace("。", "。\n")
-    # 空白行削除
     final_text_raw = f"■ {target_dist}mへの戦略\n{clean_advice}\n■ 生理学的評価\n{vo2_msg}"
     
-    # 30文字改行
     final_text_wrapped = insert_newlines(final_text_raw, length=30)
     
     ax4.text(0.02, 0.80, final_text_wrapped, fontsize=10, va='top', linespacing=1.5, fontproperties=font_main)
