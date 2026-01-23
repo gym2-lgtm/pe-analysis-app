@@ -4,22 +4,36 @@ import numpy as np
 import matplotlib.pyplot as plt
 import io, requests, json, re, os, base64, time
 import matplotlib.font_manager as fm
-import urllib.request
 from PIL import Image, ImageOps
 
 # --- 1. APIキーの取得 (Secretsから読み込む) ---
 API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 
-# --- 2. 日本語フォント設定 ---
+# --- 2. 日本語フォント設定 (強化版) ---
 @st.cache_resource
 def load_fp():
+    """日本語フォントを安全に読み込む"""
     fpath = "NotoSansJP-Regular.ttf"
-    if not os.path.exists(fpath):
-        url = "https://github.com/google/fonts/raw/main/ofl/notosansjp/NotoSansJP-Regular.ttf"
-        urllib.request.urlretrieve(url, fpath)
-    fm.fontManager.addfont(fpath)
-    plt.rcParams['font.family'] = 'Noto Sans JP'
-    return fm.FontProperties(fname=fpath)
+    # GitHubのRawリンク (urllibだとブロックされることがあるためrequestsを使用)
+    url = "https://github.com/google/fonts/raw/main/ofl/notosansjp/NotoSansJP-Regular.ttf"
+    
+    try:
+        # まだファイルがなければダウンロード
+        if not os.path.exists(fpath):
+            response = requests.get(url)
+            response.raise_for_status() # エラーならここで例外へ
+            with open(fpath, "wb") as f:
+                f.write(response.content)
+        
+        # フォント設定
+        fm.fontManager.addfont(fpath)
+        plt.rcParams['font.family'] = 'Noto Sans JP'
+        return fm.FontProperties(fname=fpath)
+        
+    except Exception as e:
+        # 万が一フォントがダメでも、アプリを止めずにNoneを返す
+        print(f"Font Error: {e}") 
+        return None
 
 # --- 3. AIエンジン ---
 def run_ai(img_bytes):
@@ -27,6 +41,7 @@ def run_ai(img_bytes):
     b64 = base64.b64encode(img_bytes).decode()
     
     try:
+        # モデル自動検出
         m_list = requests.get(f"https://generativelanguage.googleapis.com/v1beta/models?key={API_KEY}").json()
         models = [m['name'].split('/')[-1] for m in m_list.get('models', []) if 'generateContent' in m.get('supportedGenerationMethods', [])]
         target = next((m for m in models if "1.5-flash" in m), models[0])
@@ -55,7 +70,10 @@ def run_ai(img_bytes):
 
 # --- 4. レポート描画 ---
 def draw_report(data):
+    # フォント読み込み（失敗しても止まらない）
     fp = load_fp()
+    font_dict = {'fontproperties': fp} if fp else {}
+    
     laps = np.array([float(l) for l in data.get("tt_laps", [])])
     dist = float(data.get("long_run_dist", 0))
     target_d = 3000 if dist > 3200 else 2100
@@ -65,11 +83,11 @@ def draw_report(data):
     p_sec = long_min * 60 * (target_d / dist)**1.06 if dist > 0 else None
     
     fig = plt.figure(figsize=(11.69, 8.27), facecolor='white')
-    fig.text(0.05, 0.94, f"持久走 科学的分析レポート: {data.get('name','選手')} 選手", fontsize=24, weight='bold', fontproperties=fp, color='#1a237e')
+    fig.text(0.05, 0.94, f"持久走 科学的分析レポート: {data.get('name','選手')} 選手", fontsize=24, weight='bold', color='#1a237e', **font_dict)
 
     # ① 左上: 生理学的評価
     ax1 = fig.add_axes([0.05, 0.55, 0.4, 0.3]); ax1.set_axis_off()
-    ax1.set_title("① 生理学的評価", fontproperties=fp, fontsize=16, loc='left', color='#0d47a1')
+    ax1.set_title("① 生理学的評価", fontsize=16, loc='left', color='#0d47a1', **font_dict)
     vo2 = max((dist * (12/long_min) - 504.9) / 44.73, 0) if dist > 0 else 0
     txt = f"■推定VO2 Max: {vo2:.1f} ml/kg/min\n"
     if p_sec:
@@ -77,20 +95,21 @@ def draw_report(data):
         txt += f"君の心肺機能（エンジン）は非常に強力です。\n今の能力なら{target_d}mをこのタイムで走る\nポテンシャルが十分にあります。"
     else:
         txt += "※15分間走の記録が読み取れませんでした。"
-    ax1.text(0, 0.8, txt, fontproperties=fp, fontsize=12, va='top', linespacing=1.8)
+    ax1.text(0, 0.8, txt, fontsize=12, va='top', linespacing=1.8, **font_dict)
 
     # ② 右上: 周回精密データ
     ax2 = fig.add_axes([0.5, 0.55, 0.45, 0.3]); ax2.set_axis_off()
-    ax2.set_title("② 周回精密データ (ラップ表)", fontproperties=fp, fontsize=16, loc='left', color='#0d47a1')
+    ax2.set_title("② 周回精密データ (ラップ表)", fontsize=16, loc='left', color='#0d47a1', **font_dict)
     if len(laps) > 0:
         rows = [[f"{i+1}周", f"{l:.1f}s", "▲UP" if i>0 and l<laps[i-1]-1.5 else ("▼DN" if i>0 and l>laps[i-1]+2 else "―")] for i, l in enumerate(laps[:12])]
         tab = ax2.table(cellText=rows, colLabels=["周回", "ラップ", "傾向"], loc='center', cellLoc='center')
         tab.scale(1, 1.5)
-        for c in tab.get_celld().values(): c.set_text_props(fontproperties=fp)
+        if fp:
+            for c in tab.get_celld().values(): c.set_text_props(fontproperties=fp)
 
     # ③ 左下: 目標設定
     ax3 = fig.add_axes([0.05, 0.1, 0.4, 0.35]); ax3.set_axis_off()
-    ax3.set_title("③ 次回の目標設定ペース", fontproperties=fp, fontsize=16, loc='left', color='#0d47a1')
+    ax3.set_title("③ 次回の目標設定ペース", fontsize=16, loc='left', color='#0d47a1', **font_dict)
     if p_sec:
         base_l = p_sec / (target_d/300)
         rows = [
@@ -100,17 +119,18 @@ def draw_report(data):
         ]
         tab2 = ax3.table(cellText=rows, colLabels=["レベル", "ゴール", "ラップ"], loc='center', cellLoc='center', colColours=['#fff9c4']*3)
         tab2.scale(1, 2.5)
-        for c in tab2.get_celld().values(): c.set_text_props(fontproperties=fp)
+        if fp:
+            for c in tab2.get_celld().values(): c.set_text_props(fontproperties=fp)
     else:
-        ax3.text(0.1, 0.5, "算出用データ不足", fontproperties=fp)
+        ax3.text(0.1, 0.5, "算出用データ不足", **font_dict)
 
-    # ④ 右下: アドバイス（★ここを安全修正しました）
+    # ④ 右下: アドバイス
     ax4 = fig.add_axes([0.5, 0.1, 0.45, 0.35]); ax4.set_axis_off()
-    ax4.set_title("④ 戦術アドバイス", fontproperties=fp, fontsize=16, loc='left', color='#0d47a1')
+    ax4.set_title("④ 戦術アドバイス", fontsize=16, loc='left', color='#0d47a1', **font_dict)
     ax4.add_patch(plt.Rectangle((0,0), 1, 1, fill=False, edgecolor='#333'))
     
     adv = "分析結果：\n"
-    if p_sec: # データが揃っている場合のみアドバイス生成
+    if p_sec:
         base_l = p_sec / (target_d/300)
         at_p = next((i+1 for i in range(1, len(laps)) if laps[i] > laps[i-1]+3), None)
         if at_p: adv += f"● 第{at_p}周付近でスタミナの限界（AT値）に達しています。\n"
@@ -119,7 +139,7 @@ def draw_report(data):
     else:
         adv += "15分間走のデータがないため、詳細な戦術分析ができません。\n上段の距離が読み取れているか確認してください。"
         
-    ax4.text(0.05, 0.85, adv, fontproperties=fp, fontsize=11, va='top', linespacing=1.8)
+    ax4.text(0.05, 0.85, adv, fontsize=11, va='top', linespacing=1.8, **font_dict)
 
     buf = io.BytesIO(); plt.savefig(buf, format="png", bbox_inches='tight'); return buf
 
