@@ -2,344 +2,389 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import io, json, os, re
+import io, json, os, requests
 import matplotlib.font_manager as fm
 from PIL import Image, ImageOps
 import google.generativeai as genai
-import requests
 import textwrap
 
 # ==========================================
-# 1. システム設定
+# 1. システム設定 & APIキー取得
 # ==========================================
-st.set_page_config(page_title="持久走データサイエンス", layout="wide")
+st.set_page_config(page_title="持久走能力徹底分析", layout="wide")
 
-# APIキー設定
-raw_key = st.secrets.get("GEMINI_API_KEY", "")
-API_KEY = str(raw_key).replace("\n", "").replace(" ", "").replace("　", "").replace('"', "").replace("'", "").strip()
+# APIキーの安全な取得
+try:
+    api_key = st.secrets["GEMINI_API_KEY"]
+except:
+    # ローカル開発用など、secretsがない場合のフォールバック（必要なら直接入力も可）
+    api_key = os.environ.get("GEMINI_API_KEY", "")
 
-if not API_KEY:
-    st.error("SecretsにAPIキーが設定されていません。")
+if not api_key:
+    st.error("【重要】StreamlitのSecrets、または環境変数に 'GEMINI_API_KEY' を設定してください。")
     st.stop()
 
-genai.configure(api_key=API_KEY)
+genai.configure(api_key=api_key)
 
 # ==========================================
-# 2. フォント設定
+# 2. 日本語フォントの強力な確保ロジック
 # ==========================================
 @st.cache_resource
-def load_japanese_font():
-    font_filename = "JP_Font.ttf"
-    url_list = [
-        "https://moji.or.jp/wp-content/ipafont/IPAexfont/ipaexg00401.ttf",
-        "https://raw.githubusercontent.com/google/fonts/main/ofl/notosansjp/NotoSansJP-Regular.ttf",
-        "https://github.com/google/fonts/raw/main/ofl/notosansjp/NotoSansJP%5Bwght%5D.ttf"
-    ]
-    if os.path.exists(font_filename):
+def get_jp_font():
+    """
+    Matplotlibで日本語を表示するためのフォントを確保する。
+    環境になければGoogle FontsからNotoSansJPをダウンロードする。
+    """
+    font_dir = "fonts"
+    font_name = "NotoSansJP-Regular.ttf"
+    font_path = os.path.join(font_dir, font_name)
+    
+    # フォルダがなければ作成
+    if not os.path.exists(font_dir):
+        os.makedirs(font_dir)
+
+    # フォントファイルがなければダウンロード
+    if not os.path.exists(font_path):
+        url = "https://github.com/google/fonts/raw/main/ofl/notosansjp/NotoSansJP-Regular.ttf"
         try:
-            fm.fontManager.addfont(font_filename)
-            plt.rcParams['font.family'] = 'IPAexGothic'
-            return fm.FontProperties(fname=font_filename)
-        except:
-            pass
-    for url in url_list:
-        try:
-            response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+            response = requests.get(url, timeout=10)
             if response.status_code == 200:
-                with open(font_filename, "wb") as f:
+                with open(font_path, "wb") as f:
                     f.write(response.content)
-                fm.fontManager.addfont(font_filename)
-                return fm.FontProperties(fname=font_filename)
+            else:
+                return None # DL失敗
         except:
-            continue
-    return None
+            return None # ネットワークエラー等
 
-# ==========================================
-# 3. AI解析エンジン（モデル名完全固定）
-# ==========================================
-def run_ai_analysis(image_obj):
-    # ★修正：リスト取得(list_models)を廃止。
-    # 確実に存在する安定版モデル名を直接指定します。
-    # これにより "gemini-2.5-pro" 等の罠モデルを回避します。
-    target_model = "gemini-1.5-flash"
-
+    # フォントマネージャーに追加
     try:
-        model = genai.GenerativeModel(target_model)
+        fm.fontManager.addfont(font_path)
+        prop = fm.FontProperties(fname=font_path)
+        plt.rcParams['font.family'] = prop.get_name()
+        return prop
+    except:
+        return None
+
+# フォント読み込み実行
+jp_font = get_jp_font()
+font_prop_bold = jp_font # 簡易的に同じフォントを使用（Weight変える場合は別途DLが必要だが今回は安定重視）
+
+# ==========================================
+# 3. AI解析エンジン (キャッシュ付き・モデル固定)
+# ==========================================
+@st.cache_data(show_spinner=False)
+def analyze_image_with_gemini(image_bytes):
+    """
+    画像をGeminiに投げ、JSONデータを返す。
+    キャッシュ有効化により、UI操作での再実行を防ぐ。
+    """
+    model_name = "gemini-1.5-flash" # 固定・安定版
+    
+    try:
+        model = genai.GenerativeModel(model_name)
     except Exception as e:
-        return None, f"モデル設定エラー: {e}"
+        return None, f"モデル初期化エラー: {str(e)}"
 
     prompt = """
-    あなたは陸上長距離の専門分析官です。画像の「持久走記録用紙」からデータを抽出し、JSONで出力してください。
-    
-    【重要ロジック】
-    ・用紙に「15分間走」とあれば、対象は『男子』であり、目標距離は『3000m』です。
-    ・用紙に「12分間走」とあれば、対象は『女子』であり、目標距離は『2100m』です。
-    ・複数回の記録がある場合は全て抽出してください。
-    
-    【JSON構造】
+    あなたは陸上長距離の専門分析官です。画像の「持久走記録用紙」からデータを抽出し、以下の厳密なJSON形式のみを出力してください。Markdownタグ(```json)は不要です。
+
+    【ルール】
+    1. 用紙に「15分間走」とあれば `record_type_minutes` は 15。男子・目標3000m。
+    2. 用紙に「12分間走」とあれば `record_type_minutes` は 12。女子・目標2100m。
+    3. 複数回の記録がある場合は全て `records` 配列に入れる。
+    4. `coach_advice` は、データの数値（落ち込み等）に基づいた具体的なアドバイスと、生理学的観点のコメントを150文字程度で生成する。
+
+    【出力JSON構造】
     {
       "name": "選手名",
-      "record_type_minutes": 15 (または 12),
+      "record_type_minutes": 15,
       "records": [
         {
           "attempt": 1,
-          "distance": 4050, 
-          "laps": [60, 62, 65...]
+          "distance": 3200, 
+          "laps": [60, 62, 65, 68]
         }
       ],
-      "coach_advice": "AT閾値(ラップの急激な落ち込み)の分析と、フォームや粘りについてのコメントがあれば抽出。なければデータから予測される改善点を記述。120文字程度。"
+      "coach_advice": "ここにアドバイス"
     }
     """
 
     try:
-        response = model.generate_content([prompt, image_obj], generation_config={"response_mime_type": "application/json"})
+        # 画像データをPILオブジェクトからBytesへ（入力がbytesの場合はそのまま使うが、ここではPILを想定してBytes変換済みを受け取るか、PILを渡す）
+        # StreamlitのUploadFileをPILに変換してから渡す
+        img = Image.open(io.BytesIO(image_bytes))
+        
+        response = model.generate_content(
+            [prompt, img],
+            generation_config={"response_mime_type": "application/json"}
+        )
         return json.loads(response.text), None
     except Exception as e:
-        return None, f"解析エラー: {e}"
+        return None, f"解析エラー: {str(e)}"
 
 # ==========================================
-# 4. レポート描画（レイアウト完成版）
+# 4. レポート描画ロジック (A4横・Matplotlib)
 # ==========================================
-def create_report_image(data):
-    fp = load_japanese_font()
-    font_main = fp if fp else None
-    font_bold = fp if fp else None
-
-    # ヘルパー関数
-    def insert_newlines(text, length=30):
-        lines = text.split('\n')
-        wrapped_lines = []
-        for line in lines:
-            if len(line) > length:
-                for i in range(0, len(line), length):
-                    wrapped_lines.append(line[i:i+length])
-            else:
-                wrapped_lines.append(line)
-        return '\n'.join(wrapped_lines)
-
-    # --- データ整理 ---
+def create_athlete_report(data):
+    # --- データ準備 ---
     name = data.get("name", "選手")
     records = data.get("records", [])
-    advice = data.get("coach_advice", "")
-    
-    best_rec = {"distance": 0, "laps": []}
-    if records:
-        best_rec = max(records, key=lambda x: float(x.get("distance", 0)))
-    
-    l_dist = float(best_rec.get("distance", 0))
-
+    advice_text = data.get("coach_advice", "データ不足のためアドバイスを生成できません。")
     base_min = int(data.get("record_type_minutes", 15))
-    if l_dist > 0 and base_min == 12:
-        if (12 * 60) / (l_dist / 100) < 19.5: base_min = 15
 
+    # 自己ベスト特定
+    best_record = {"distance": 0, "laps": []}
+    if records:
+        # distanceが文字列の場合も考慮してfloat変換
+        best_record = max(records, key=lambda x: float(str(x.get("distance", 0)).replace("m","")))
+    
+    best_dist = float(str(best_record.get("distance", 0)).replace("m",""))
+    laps = best_record.get("laps", [])
+
+    # 種目別設定
     if base_min == 15:
         target_dist = 3000
+        gender_label = "男子"
     else:
         target_dist = 2100
+        gender_label = "女子"
 
     # --- 科学的計算 ---
-    current_pace_100m = (base_min * 60) / (l_dist / 100) if l_dist > 0 else 0
-    pace_1k_sec = current_pace_100m * 10
-    p1k_m = int(pace_1k_sec // 60)
-    p1k_s = int(pace_1k_sec % 60)
-
-    dist_12min = l_dist * (12 / base_min) if base_min > 0 else 0
-    vo2_max = (dist_12min - 504.9) / 44.73 if dist_12min > 504.9 else 0
-    
-    t1_sec = base_min * 60
-    theoretical_sec = t1_sec * (target_dist / l_dist)**1.06 if l_dist > 0 else 0
-    target_sec = theoretical_sec * 0.99 
-    target_pace_100m = target_sec / (target_dist / 100) if target_dist > 0 else 0
-    p1k_tgt = target_pace_100m * 10
-
-    # VO2Maxコメント
-    potential_3k_sec = 0
-    if vo2_max > 0:
-        potential_3k_sec = (11000 / vo2_max) * 3.2 
-    pm_pot, ps_pot = divmod(potential_3k_sec, 60)
-
-    vo2_msg = ""
-    if vo2_max >= 62:
-        vo2_msg = f"VO2Max {vo2_max:.1f}は、3000mを{int(pm_pot)}分{int(ps_pot):02d}秒前後で走れる心肺能力です。"
-    elif vo2_max >= 56:
-        vo2_msg = f"VO2Max {vo2_max:.1f}は、3000mを{int(pm_pot)}分{int(ps_pot):02d}秒で走れるエンジン性能です。"
-    elif vo2_max >= 48:
-        vo2_msg = f"VO2Max {vo2_max:.1f}は、長距離ランナーとしての強固な土台を示しています。"
+    # 1. ペース計算
+    run_seconds = base_min * 60
+    if best_dist > 0:
+        mean_pace_sec_per_km = run_seconds / (best_dist / 1000)
+        p_min = int(mean_pace_sec_per_km // 60)
+        p_sec = int(mean_pace_sec_per_km % 60)
+        pace_str = f"{p_min}'{p_sec:02d}/km"
+        
+        # 100m換算
+        pace_100m = run_seconds / (best_dist / 100)
     else:
-        vo2_msg = f"現在のVO2Maxは{vo2_max:.1f}です。まずはLSD等で土台を作りましょう。"
+        pace_str = "-'--/km"
+        pace_100m = 0
 
-    # 描画開始
-    fig = plt.figure(figsize=(11.69, 8.27), facecolor='white', dpi=150)
+    # 2. VO2Max (クーパーテスト変法: 12分間走換算)
+    # 15分の場合、12分時点の距離を推計 (単純比例)
+    dist_12min = best_dist * (12 / base_min)
+    vo2max = (dist_12min - 504.9) / 44.73
+    if vo2max < 0: vo2max = 0
+
+    # 3. ターゲットタイム (リーゲルの公式: T2 = T1 * (D2/D1)^1.06)
+    if best_dist > 0:
+        pred_sec = run_seconds * (target_dist / best_dist) ** 1.06
+        # 攻めの目標 (98-99%程度に設定)
+        target_sec_aggressive = pred_sec * 0.99 
+        t_min = int(target_sec_aggressive // 60)
+        t_sec = int(target_sec_aggressive % 60)
+        target_time_str = f"{t_min}分{t_sec:02d}秒"
+    else:
+        target_time_str = "--分--秒"
+
+    # --- 描画開始 ---
+    fig = plt.figure(figsize=(11.69, 8.27), dpi=150, facecolor='white')
     
     # ヘッダー
-    fig.text(0.05, 0.95, "ATHLETE PERFORMANCE REPORT", fontsize=16, color='#7f8c8d', fontproperties=font_bold)
-    fig.text(0.05, 0.90, f"{name} 選手 ｜ 持久走能力徹底分析", fontsize=26, color='#2c3e50', fontproperties=font_bold)
+    fig.text(0.05, 0.94, "ATHLETE PERFORMANCE REPORT", fontsize=14, color='gray', fontproperties=jp_font)
+    fig.text(0.05, 0.88, f"{name} 選手 ｜ 持久走能力徹底分析 ({base_min}分間走)", fontsize=24, weight='bold', color='#1a237e', fontproperties=jp_font)
+    fig.lines.append(plt.Line2D([0.05, 0.95], [0.86, 0.86], transform=fig.transFigure, color='#1a237e', linewidth=2))
 
-    # ----------------------------------------------------
-    # ① 左上：科学的ポテンシャル
-    # ----------------------------------------------------
-    ax1 = fig.add_axes([0.05, 0.66, 0.35, 0.22]) 
-    ax1.set_axis_off()
-    ax1.add_patch(plt.Rectangle((0,0), 1, 1, facecolor='#f4f6f7', edgecolor='#bdc3c7', transform=ax1.transAxes))
-    ax1.text(0.05, 0.90, "【① 科学的ポテンシャル診断 (Best)】", fontsize=14, color='#2980b9', fontproperties=font_bold)
-
-    tm, ts = divmod(target_sec, 60)
+    # ==========================
+    # エリア①: 左上 (科学的ポテンシャル)
+    # ==========================
+    ax1 = fig.add_axes([0.05, 0.60, 0.35, 0.22]) # [left, bottom, width, height]
+    ax1.axis('off')
     
-    lines = [
-        f"● 測定記録 ({base_min}分間走)",
-        f"   距離: {int(l_dist)} m",
-        f"   平均ペース: {p1k_m}'{p1k_s:02d}/km",
-        f"● エンジン性能 (推定VO2Max)",
-        f"   {vo2_max:.1f} ml/kg/min",
-        f"● {target_dist}m 挑戦目標タイム",
-        f"   {int(tm)}分{int(ts):02d}秒",
-        f"   設定ペース: {int(p1k_tgt//60)}'{int(p1k_tgt%60):02d}/km",
-        "   (強度を上げて挑む設定)"
-    ]
+    # 角丸四角形風の背景
+    rect = plt.Rectangle((0, 0), 1, 1, transform=ax1.transAxes, color='#f5f5f5', zorder=0)
+    ax1.add_patch(rect)
     
-    ax1.text(0.05, 0.82, "\n".join(lines), fontsize=11, va='top', linespacing=1.6, fontproperties=font_main)
+    ax1.text(0.05, 0.85, "■ Scientific Diagnosis (Best)", fontsize=12, color='#333', weight='bold', fontproperties=jp_font)
+    
+    info_text = (
+        f"自己ベスト距離: {int(best_dist)} m\n"
+        f"平均ペース: {pace_str} ({pace_100m:.1f}秒/100m)\n"
+        f"推定VO2Max: {vo2max:.1f} ml/kg/min\n"
+        f"----------------------------\n"
+        f"【{target_dist}m 目標タイム】\n"
+        f" >> {target_time_str}"
+    )
+    ax1.text(0.05, 0.70, info_text, fontsize=14, va='top', linespacing=1.6, fontproperties=jp_font)
 
-    # ----------------------------------------------------
-    # ② 右上〜中：精密ラップ解析表
-    # ----------------------------------------------------
-    ax2 = fig.add_axes([0.43, 0.42, 0.52, 0.48]) 
-    ax2.set_axis_off()
-    ax2.text(0, 1.01, f"【② {base_min}分間走 ラップ推移 & AT閾値判定】", fontsize=14, color='#2980b9', fontproperties=font_bold)
+    # ==========================
+    # エリア②: 右側 (精密ラップ解析表)
+    # ==========================
+    ax2 = fig.add_axes([0.45, 0.40, 0.50, 0.42]) 
+    ax2.axis('off')
+    ax2.set_title("■ Lap Analysis & AT Threshold Check", loc='left', fontsize=12, pad=10, fontproperties=jp_font)
 
     if records:
-        cols = ["周"]
-        for r in records:
-            idx = r.get("attempt", "?")
-            cols.extend([f"#{idx} Lap", f"#{idx} Split"])
+        # テーブルデータ作成
+        # 最大周回数取得
+        max_laps = max([len(r.get("laps", [])) for r in records])
         
-        max_laps = max([len(r.get("laps", [])) for r in records]) if records else 0
-        cell_data = []
-        AT_THRESHOLD = 2.0 
-
-        for i in range(max_laps):
-            row = [f"{i+1}"]
-            for rec in records:
-                laps = rec.get("laps", [])
-                if i < len(laps):
-                    l_val = laps[i]
-                    s_val = sum(laps[:i+1])
-                    sm, ss = divmod(s_val, 60)
-                    row.append(f"{l_val:.1f}")
-                    row.append(f"{int(sm)}:{int(ss):02d}")
+        col_labels = ["No."]
+        for i, _ in enumerate(records):
+            col_labels.extend([f"#{i+1} Lap", f"#{i+1} Split"])
+            
+        table_data = []
+        # 行データ
+        for lap_idx in range(max_laps):
+            row = [f"{lap_idx+1}"]
+            for r in records:
+                laps_list = r.get("laps", [])
+                if lap_idx < len(laps_list):
+                    val = laps_list[lap_idx]
+                    split = sum(laps_list[:lap_idx+1])
+                    sp_m, sp_s = divmod(split, 60)
+                    row.extend([f"{val:.1f}", f"{int(sp_m)}:{int(sp_s):02d}"])
                 else:
                     row.extend(["-", "-"])
-            cell_data.append(row)
+            table_data.append(row)
+        
+        # 総距離行
+        row_dist = ["Dist"]
+        for r in records:
+            d = r.get("distance", "-")
+            row_dist.extend([f"{d}m", ""])
+        table_data.append(row_dist)
 
-        dist_row = ["DIST"]
-        for rec in records:
-            d = rec.get("distance", "-")
-            dist_row.extend([f"{d}m", ""])
-        cell_data.append(dist_row)
-
-        table = ax2.table(cellText=cell_data, colLabels=cols, loc='center', cellLoc='center')
+        # テーブル描画
+        table = ax2.table(cellText=table_data, colLabels=col_labels, loc='center', cellLoc='center')
         table.auto_set_font_size(False)
         table.set_fontsize(9)
-        table.scale(1, 1.25)
+        table.scale(1, 1.4)
 
-        for (r, c), cell in table.get_celld().items():
-            if r == 0:
-                cell.set_facecolor('#34495e')
-                cell.set_text_props(color='white')
-                if font_bold: cell.set_text_props(fontproperties=font_bold)
-            elif r == len(cell_data):
-                cell.set_facecolor('#ecf0f1')
+        # 装飾 & AT判定
+        cells = table.get_celld()
+        for (r, c), cell in cells.items():
+            cell.set_text_props(fontproperties=jp_font)
+            if r == 0: # Header
+                cell.set_facecolor('#424242')
+                cell.set_text_props(color='white', fontproperties=jp_font)
+            elif r == len(table_data): # Footer (Distance)
+                cell.set_facecolor('#e0e0e0')
+                cell.set_text_props(weight='bold', fontproperties=jp_font)
             else:
-                if c > 0 and c % 2 != 0:
+                # AT判定ロジック (Lap列のみ)
+                if c > 0 and c % 2 != 0: # Lap columns (1, 3, 5...)
                     rec_idx = (c - 1) // 2
-                    laps = records[rec_idx].get("laps", [])
-                    if r-1 < len(laps):
-                        curr_lap = laps[r-1]
-                        if r > 1:
-                            prev_lap = laps[r-2]
-                            if curr_lap - prev_lap >= AT_THRESHOLD:
-                                cell.set_facecolor('#fadbd8')
-                                cell.set_text_props(color='#c0392b', weight='bold')
-            if font_main and r > 0: pass
+                    laps_list = records[rec_idx].get("laps", [])
+                    current_lap_idx = r - 1
+                    
+                    if current_lap_idx < len(laps_list) and current_lap_idx > 0:
+                        prev = laps_list[current_lap_idx - 1]
+                        curr = laps_list[current_lap_idx]
+                        if (curr - prev) >= 2.0: # 2秒以上の落ち込み
+                            cell.set_facecolor('#ffcdd2') # 薄い赤
+                            cell.set_text_props(color='#b71c1c', weight='bold')
 
-    # ----------------------------------------------------
-    # ③ 左下：目標ペース配分表
-    # ----------------------------------------------------
-    ax3 = fig.add_axes([0.05, 0.05, 0.35, 0.55]) 
-    ax3.set_axis_off()
-    ax3.text(0, 1.005, f"【③ {target_dist}m 目標ペース】", fontsize=14, color='#2980b9', fontproperties=font_bold)
+    # ==========================
+    # エリア③: 左下 (目標ペース配分表)
+    # ==========================
+    # エリア①の下、エリア④の左
+    ax3 = fig.add_axes([0.05, 0.10, 0.35, 0.45])
+    ax3.axis('off')
+    ax3.text(0, 1.02, f"■ {target_dist}m Target Pace", fontsize=12, weight='bold', fontproperties=jp_font)
 
-    if target_sec > 0:
-        levels = [("維持", 1.05), ("PB更新", 1.00), ("限界突破", 0.94)]
-        cols3 = ["周回"] + [l[0] for l in levels]
-        rows3 = []
+    if target_sec_aggressive > 0:
+        patterns = [
+            ("維持", 1.05),
+            ("PB更新", 1.00),
+            ("突破", 0.94)
+        ]
         
-        lap_len = 300 
-        total_laps = int(target_dist / lap_len)
-        targets = [target_sec * l[1] for l in levels]
+        col3 = ["地点"] + [p[0] for p in patterns]
+        row3 = []
         
-        for i in range(1, total_laps + 1):
-            row = [f"{i*lap_len}m"]
-            for tgt in targets:
-                pass_time = tgt * (i / total_laps)
-                pm, ps = divmod(pass_time, 60)
-                row.append(f"{int(pm)}:{int(ps):02d}")
-            rows3.append(row)
+        check_points = [1000, 2000, 3000] if target_dist == 3000 else [1000, 2000, 2100]
+        
+        for cp in check_points:
+            if cp > target_dist: continue
+            r_dat = [f"{cp}m"]
+            ratio = cp / target_dist
+            for _, factor in patterns:
+                tgt_s = target_sec_aggressive * factor * ratio
+                tm, ts = divmod(tgt_s, 60)
+                r_dat.append(f"{int(tm)}:{int(ts):02d}")
+            row3.append(r_dat)
             
-        table3 = ax3.table(cellText=rows3, colLabels=cols3, loc='center', cellLoc='center')
-        table3.auto_set_font_size(False)
-        table3.set_fontsize(10)
-        table3.scale(1, 1.55)
+        t3 = ax3.table(cellText=row3, colLabels=col3, loc='top', cellLoc='center')
+        t3.scale(1, 1.8)
+        t3.auto_set_font_size(False)
+        t3.set_fontsize(10)
         
-        for (r, c), cell in table3.get_celld().items():
+        for (r, c), cell in t3.get_celld().items():
+            cell.set_text_props(fontproperties=jp_font)
             if r == 0:
-                cell.set_facecolor('#2980b9')
-                cell.set_text_props(color='white')
-                if font_bold: cell.set_text_props(fontproperties=font_bold)
-            elif c == 0:
-                cell.set_facecolor('#ecf0f1')
-            elif c == 3:
-                cell.set_facecolor('#d6eaf8')
+                cell.set_facecolor('#1976d2') # 青
+                cell.set_text_props(color='white', fontproperties=jp_font)
 
-    # ----------------------------------------------------
-    # ④ 右下：専門アドバイス
-    # ----------------------------------------------------
-    ax4 = fig.add_axes([0.43, 0.05, 0.52, 0.30])
-    ax4.set_axis_off()
-    ax4.add_patch(plt.Rectangle((0,0), 1, 1, facecolor='#fff9c4', edgecolor='#f1c40f', transform=ax4.transAxes))
-    ax4.text(0.02, 0.88, "【④ COACH'S EYE / 専門的アドバイス】", fontsize=13, color='#d35400', fontproperties=font_bold)
+    # ==========================
+    # エリア④: 右下 (AIコーチのアドバイス)
+    # ==========================
+    ax4 = fig.add_axes([0.45, 0.05, 0.50, 0.30])
+    ax4.axis('off')
     
-    clean_advice = advice.replace("。", "。\n")
-    final_text_raw = f"■ {target_dist}mへの戦略\n{clean_advice}\n■ 生理学的評価\n{vo2_msg}"
+    # 背景 (薄い黄色)
+    rect4 = plt.Rectangle((0, 0), 1, 1, transform=ax4.transAxes, color='#fff9c4', zorder=0)
+    ax4.add_patch(rect4)
     
-    final_text_wrapped = insert_newlines(final_text_raw, length=30)
+    ax4.text(0.02, 0.90, "■ AI Coach's Advice", fontsize=12, color='#e65100', weight='bold', fontproperties=jp_font)
     
-    ax4.text(0.02, 0.80, final_text_wrapped, fontsize=10, va='top', linespacing=1.5, fontproperties=font_main)
+    # テキスト整形 (30文字折り返し)
+    wrapped_lines = textwrap.wrap(advice_text, width=28)
+    final_advice = "\n".join(wrapped_lines)
+    
+    ax4.text(0.02, 0.80, final_advice, fontsize=10, va='top', linespacing=1.5, fontproperties=jp_font)
 
-    # 保存
+    # 画像化して戻す
     buf = io.BytesIO()
     plt.savefig(buf, format="png", bbox_inches='tight')
+    buf.seek(0)
     return buf
 
 # ==========================================
-# 5. メインUI
+# 5. UIメイン処理
 # ==========================================
-st.title("Data Science Athlete Report")
-st.write("記録用紙をアップロードしてください。")
+st.title("🏃 Data Science Athlete Report")
+st.markdown("記録用紙をアップロードすると、**A4一枚の分析レポート**を生成します。")
 
-uploaded_file = st.file_uploader("", type=['jpg', 'jpeg', 'png'])
+uploaded_file = st.file_uploader("画像のアップロード", type=['png', 'jpg', 'jpeg'])
 
 if uploaded_file:
-    with st.spinner("AI分析中..."):
-        try:
-            image = Image.open(uploaded_file)
-            image = ImageOps.exif_transpose(image).convert('RGB')
+    # 画像を表示（確認用）
+    st.image(uploaded_file, caption="Uploaded Image", width=300)
+    
+    # 解析ボタン（誤操作防止）
+    if st.button("AI解析＆レポート生成"):
+        with st.spinner("AIが記録用紙を解析中... (Gemini 1.5 Flash)"):
+            file_bytes = uploaded_file.getvalue()
             
-            data, err = run_ai_analysis(image)
+            # 1. 解析
+            json_data, error = analyze_image_with_gemini(file_bytes)
             
-            if data:
-                st.success("作成完了")
-                st.image(create_report_image(data), use_column_width=True)
+            if error:
+                st.error(error)
             else:
-                st.error(f"解析エラー: {err}")
-        except Exception as e:
-            st.error(f"システムエラー: {e}")
+                # デバッグ用（本番では消しても良い）
+                with st.expander("抽出データを確認"):
+                    st.json(json_data)
+                
+                # 2. レポート生成
+                with st.spinner("レポートを描画中..."):
+                    try:
+                        report_img_buf = create_athlete_report(json_data)
+                        
+                        st.success("レポート生成完了！")
+                        st.image(report_img_buf, caption="Generated Report", use_container_width=True)
+                        
+                        # ダウンロードボタン
+                        st.download_button(
+                            label="レポートをダウンロード (PNG)",
+                            data=report_img_buf,
+                            file_name=f"{json_data.get('name', 'athlete')}_report.png",
+                            mime="image/png"
+                        )
+                    except Exception as e:
+                        st.error(f"描画エラー: {e}")
