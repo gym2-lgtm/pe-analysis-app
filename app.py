@@ -95,7 +95,7 @@ def run_ai_analysis(image_obj):
         return None, f"解析エラー: {e}"
 
 # ==========================================
-# 4. レポート描画（科学的根拠・完全版）
+# 4. レポート描画（レイアウト微調整・完成版）
 # ==========================================
 def create_report_image(data):
     fp = load_japanese_font()
@@ -125,33 +125,23 @@ def create_report_image(data):
         target_dist = 2100
 
     # --- 科学的計算 ---
-    # 現状の100mペース
     current_pace_100m = (base_min * 60) / (l_dist / 100) if l_dist > 0 else 0
     
-    # VO2Max
     dist_12min = l_dist * (12 / base_min) if base_min > 0 else 0
     vo2_max = (dist_12min - 504.9) / 44.73 if dist_12min > 504.9 else 0
     
-    # ターゲットタイム算出（理論限界値）
+    # ターゲットタイム
     t1_sec = base_min * 60
     theoretical_sec = t1_sec * (target_dist / l_dist)**1.06 if l_dist > 0 else 0
-    
-    # 目標タイム（理論値より少し速く設定して強度アップを促す）
     target_sec = theoretical_sec * 0.99 
-    
-    # ターゲットペース
     target_pace_100m = target_sec / (target_dist / 100) if target_dist > 0 else 0
 
-    # --- ★科学的根拠に基づく専門コメント生成（ここを強化） ---
-    # VO2Maxから「ポテンシャルタイム」を逆算して提示
+    # --- VO2Maxポテンシャル推定 ---
     potential_3k_sec = 0
     if vo2_max > 0:
-        # 簡易ダニエルズ式逆算に近いロジックで3000mポテンシャルを推定
-        # (VO2Max 60 -> 9:55付近)
-        potential_3k_sec = (11000 / vo2_max) * 3.2 # 係数による概算
-    
+        potential_3k_sec = (11000 / vo2_max) * 3.2 
     pm_pot, ps_pot = divmod(potential_3k_sec, 60)
-    
+
     vo2_msg = ""
     if vo2_max >= 62:
         vo2_msg = f"VO2Max {vo2_max:.1f}は、本来3000mを【{int(pm_pot)}分{int(ps_pot):02d}秒】前後で走れる極めて高い心肺能力です。スピード持久力を磨けば全国レベルも視野に入ります。"
@@ -169,12 +159,18 @@ def create_report_image(data):
     fig.text(0.05, 0.95, "ATHLETE PERFORMANCE REPORT", fontsize=16, color='#7f8c8d', fontproperties=font_bold)
     fig.text(0.05, 0.90, f"{name} 選手 ｜ 持久走能力徹底分析", fontsize=26, color='#2c3e50', fontproperties=font_bold)
 
+    # ----------------------------------------------------
     # ① 左上：科学的ポテンシャル
-    ax1 = fig.add_axes([0.05, 0.65, 0.35, 0.22]) 
+    # ----------------------------------------------------
+    # 位置調整：高さを確保しつつ、Area3との被りを避ける位置
+    # [left, bottom, width, height]
+    ax1 = fig.add_axes([0.05, 0.61, 0.35, 0.25]) 
     ax1.set_axis_off()
+    
+    # 背景 (長方形)
     ax1.add_patch(plt.Rectangle((0,0), 1, 1, facecolor='#f4f6f7', edgecolor='#bdc3c7', transform=ax1.transAxes))
     
-    ax1.text(0.05, 0.90, "【① 科学的ポテンシャル診断 (Best)】", fontsize=14, color='#2980b9', fontproperties=font_bold)
+    ax1.text(0.05, 0.92, "【① 科学的ポテンシャル診断 (Best)】", fontsize=14, color='#2980b9', fontproperties=font_bold)
 
     p1k_curr = current_pace_100m * 10
     p1k_tgt = target_pace_100m * 10
@@ -193,10 +189,16 @@ def create_report_image(data):
         f"   設定ペース: {int(p1k_tgt//60)}'{int(p1k_tgt%60):02d}/km",
         "   (強度を上げて挑む設定)"
     ]
-    ax1.text(0.05, 0.82, "\n".join(lines), fontsize=11, va='top', linespacing=1.5, fontproperties=font_main)
+    
+    # フォントサイズを微調整し、行間を詰めて収める
+    ax1.text(0.05, 0.85, "\n".join(lines), fontsize=10.5, va='top', linespacing=1.6, fontproperties=font_main)
 
+    # ----------------------------------------------------
     # ② 右上〜中：精密ラップ解析表
-    ax2 = fig.add_axes([0.43, 0.42, 0.52, 0.48]) 
+    # ----------------------------------------------------
+    # 位置調整：上部ヘッダーとの衝突を避けるため少し下げる (bottom 0.42 -> topが0.90付近になるよう調整)
+    # [0.43, 0.36, 0.52, 0.50] -> Top is 0.86. 安全圏。
+    ax2 = fig.add_axes([0.43, 0.36, 0.52, 0.50]) 
     ax2.set_axis_off()
     ax2.text(0, 1.01, f"【② {base_min}分間走 ラップ推移 & AT閾値判定】", fontsize=14, color='#2980b9', fontproperties=font_bold)
 
@@ -255,8 +257,12 @@ def create_report_image(data):
                                 cell.set_text_props(color='#c0392b', weight='bold')
             if font_main and r > 0: pass
 
+    # ----------------------------------------------------
     # ③ 左下：目標ペース配分表
-    ax3 = fig.add_axes([0.05, 0.05, 0.35, 0.55]) 
+    # ----------------------------------------------------
+    # 位置調整：Area1の下端(0.61)より十分に下げる。
+    # [0.05, 0.05, 0.35, 0.50] -> Top is 0.55. Area1 Bottom is 0.61. Gap is 0.06. Perfect.
+    ax3 = fig.add_axes([0.05, 0.05, 0.35, 0.50]) 
     ax3.set_axis_off()
     ax3.text(0, 1.01, f"【③ {target_dist}m 目標ペース】", fontsize=14, color='#2980b9', fontproperties=font_bold)
 
@@ -280,7 +286,7 @@ def create_report_image(data):
         table3 = ax3.table(cellText=rows3, colLabels=cols3, loc='center', cellLoc='center')
         table3.auto_set_font_size(False)
         table3.set_fontsize(10)
-        table3.scale(1, 1.6)
+        table3.scale(1, 1.55)
         
         for (r, c), cell in table3.get_celld().items():
             if r == 0:
@@ -292,16 +298,20 @@ def create_report_image(data):
             elif c == 3:
                 cell.set_facecolor('#d6eaf8')
 
+    # ----------------------------------------------------
     # ④ 右下：専門アドバイス
-    ax4 = fig.add_axes([0.43, 0.05, 0.52, 0.30])
+    # ----------------------------------------------------
+    ax4 = fig.add_axes([0.43, 0.05, 0.52, 0.28])
     ax4.set_axis_off()
+    
     ax4.add_patch(plt.Rectangle((0,0), 1, 1, facecolor='#fff9c4', edgecolor='#f1c40f', transform=ax4.transAxes))
-    ax4.text(0.02, 0.90, "【④ COACH'S EYE / 専門的アドバイス】", fontsize=14, color='#d35400', fontproperties=font_bold)
+    
+    ax4.text(0.02, 0.88, "【④ COACH'S EYE / 専門的アドバイス】", fontsize=13, color='#d35400', fontproperties=font_bold)
     
     clean_advice = advice.replace("。", "。\n")
     final_text = f"■ {target_dist}mへの戦略\n{clean_advice}\n\n■ 生理学的評価\n{vo2_msg}"
     
-    ax4.text(0.02, 0.82, final_text, fontsize=10, va='top', linespacing=1.6, fontproperties=font_main)
+    ax4.text(0.02, 0.80, final_text, fontsize=10, va='top', linespacing=1.5, fontproperties=font_main)
 
     # 保存
     buf = io.BytesIO()
