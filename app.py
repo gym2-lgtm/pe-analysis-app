@@ -33,17 +33,17 @@ def get_japanese_font_prop():
         return None
 
 # ==========================================
-# 1. AI読み取りエンジン (安定版固定・制限回避)
+# 1. AI読み取りエンジン (セキュリティ解除 & 詳細ログ版)
 # ==========================================
 def analyze_image(img_bytes):
     base64_data = base64.b64encode(img_bytes).decode('utf-8')
     
-    # ★修正点: 実験版(exp)やPro版は制限にかかりやすいので除外。
-    # 「gemini-1.5-flash」のみに絞ることでQuotaエラーを回避します。
+    # 試すモデルのリスト
     models_to_try = [
         "gemini-1.5-flash",
         "gemini-1.5-flash-latest",
-        "gemini-1.5-flash-001"
+        "gemini-1.5-flash-001",
+        "gemini-1.5-pro"
     ]
     
     prompt = """
@@ -64,9 +64,21 @@ def analyze_image(img_bytes):
     """
     
     headers = {'Content-Type': 'application/json'}
-    payload = {"contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "image/jpeg", "data": base64_data}}]}]}
     
-    last_error = ""
+    # ★修正点: セキュリティフィルターを「なし(BLOCK_NONE)」に設定して、名前の読み取り拒否を防ぐ
+    safety_settings = [
+        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
+    ]
+
+    payload = {
+        "contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "image/jpeg", "data": base64_data}}]}],
+        "safetySettings": safety_settings
+    }
+    
+    last_error = "詳細なし"
     
     for model_name in models_to_try:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={API_KEY}"
@@ -77,28 +89,38 @@ def analyze_image(img_bytes):
             # エラーチェック
             if "error" in result_json:
                 error_msg = result_json['error']['message'].lower()
-                # 429エラー(Resource exhausted/Quota)なら少し待って次へ
-                if "quota" in error_msg or "exhausted" in error_msg:
-                    time.sleep(2) # 2秒待機
-                    last_error = f"{model_name} (制限超過): {error_msg}"
+                if any(x in error_msg for x in ["quota", "exhausted", "limit"]):
+                    time.sleep(2)
+                    last_error = f"{model_name} (制限): {error_msg}"
                     continue
-                # モデルが見つからない場合も次へ
                 if "not found" in error_msg:
                     continue
-                    
+                
                 return None, f"APIエラー: {result_json['error']['message']}"
             
-            if 'candidates' in result_json:
-                text = result_json['candidates'][0]['content']['parts'][0]['text']
-                match = re.search(r'\{.*\}', text, re.DOTALL)
-                if match:
-                    return json.loads(match.group(0)), None
+            # 候補チェック
+            if 'candidates' in result_json and len(result_json['candidates']) > 0:
+                candidate = result_json['candidates'][0]
+                
+                # ★ここが重要: AIが回答を拒否した理由をチェック
+                if 'finishReason' in candidate and candidate['finishReason'] != 'STOP':
+                    last_error = f"{model_name} 中断理由: {candidate['finishReason']} (SafetyFilter等の可能性)"
+                    continue # 別のモデルで試す
+                
+                if 'content' in candidate:
+                    text = candidate['content']['parts'][0]['text']
+                    match = re.search(r'\{.*\}', text, re.DOTALL)
+                    if match:
+                        return json.loads(match.group(0)), None
+            else:
+                # candidatesが空の場合
+                last_error = f"{model_name}: 応答が空でした。JSON: {json.dumps(result_json)}"
             
         except Exception as e:
-            last_error = str(e)
+            last_error = f"{model_name} 通信エラー: {str(e)}"
             continue
 
-    return None, f"解析に失敗しました。しばらく時間を空けて試してください。(詳細: {last_error})"
+    return None, f"解析失敗。詳細: {last_error}"
 
 # ==========================================
 # 2. 科学的分析ロジック
