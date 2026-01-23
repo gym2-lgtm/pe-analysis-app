@@ -2,32 +2,30 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import io, json, os, re
+import io, json, os, re, time
 import matplotlib.font_manager as fm
 from PIL import Image, ImageOps
-
-# ★ここが新兵器：Google公式のAI操作ツールを読み込む
 import google.generativeai as genai
 from google.api_core import exceptions as google_exceptions
 
 # ---------------------------------------------------------
-# 1. APIキーの設定（公式SDKに渡す）
+# 1. APIキーの設定（徹底クリーニング）
 # ---------------------------------------------------------
 raw_key = st.secrets.get("GEMINI_API_KEY", "")
-# キーのクリーニング（改行やゴミを削除）
+# 改行、スペース、クォートなどを全て削除してクリーンにする
 API_KEY = str(raw_key).replace("\n", "").replace(" ", "").replace("　", "").replace('"', "").replace("'", "").strip()
 
-# 公式ツールにキーを登録（これで接続設定は完了）
 if API_KEY:
     genai.configure(api_key=API_KEY)
 
 # ---------------------------------------------------------
-# 2. フォント設定（変更なし）
+# 2. フォント設定（安全装置付き）
 # ---------------------------------------------------------
 @st.cache_resource
 def load_japanese_font():
-    import requests # フォント取得のみrequestsを使用
+    import requests
     font_path = "NotoSansJP-Regular.ttf"
+    # Google Fontsの安定URL
     url = "https://raw.githubusercontent.com/google/fonts/main/ofl/notosansjp/NotoSansJP-Regular.ttf"
     try:
         if not os.path.exists(font_path):
@@ -43,51 +41,65 @@ def load_japanese_font():
         return None
 
 # ---------------------------------------------------------
-# 3. AI解析エンジン（Google公式SDK使用）
+# 3. AI解析エンジン（多段ロケット式・再試行ロジック）
 # ---------------------------------------------------------
 def run_ai_analysis(image_obj):
     if not API_KEY:
         return None, "APIキーが設定されていません。Secretsを確認してください。"
 
-    # 使用するモデル：安定版の 1.5-flash を指定
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    # 試行するモデルの優先順位リスト
+    # 新しい順に試し、だめなら古い安定版へ落ちていく
+    candidate_models = [
+        "gemini-1.5-flash",
+        "gemini-1.5-pro",
+        "gemini-pro",        # 1.0 Pro
+        "gemini-1.0-pro"     # 表記揺れ対応
+    ]
 
     prompt = """
     この「持久走記録用紙」の画像を読み取り、以下のデータを抽出してJSON形式のみで出力してください。
     
     【抽出項目】
     1. "name": 名前（読めなければ "選手"）
-    2. "long_run_dist": 上段の距離(m)。数値のみ。
+    2. "long_run_dist": 上段の距離(m)。数値のみ。(例: 4050)
     3. "tt_laps": 下段のラップタイム(秒)の数値リスト。
     
     【厳守】
     JSONデータ以外の文字（```json や解説）は一切書かないでください。
     """
 
-    try:
-        # ★公式SDKを使ってAIに命令（URLなどは自動処理される）
-        response = model.generate_content(
-            [prompt, image_obj],
-            generation_config={"response_mime_type": "application/json"}
-        )
-        
-        # 結果の取り出し
-        text = response.text
-        
-        # JSONクリーニング（念のため）
-        match = re.search(r'\{.*\}', text, re.DOTALL)
-        if match:
-            return json.loads(match.group(0)), None
-        else:
-            # そのままパースを試みる
-            return json.loads(text), None
+    last_error = ""
 
-    except google_exceptions.InvalidArgument as e:
-        return None, f"API設定エラー: キーが無効か、画像サイズが大きすぎます。({e})"
-    except google_exceptions.PermissionDenied:
-        return None, "アクセス拒否: APIキーが間違っています。Secretsを再確認してください。"
-    except Exception as e:
-        return None, f"解析エラー: {str(e)}"
+    # ★ここが修正の核心：順番にモデルを試していくループ
+    for model_name in candidate_models:
+        try:
+            # モデルをセット
+            model = genai.GenerativeModel(model_name)
+            
+            # 実行（画像とテキストを渡す）
+            response = model.generate_content(
+                [prompt, image_obj],
+                generation_config={"response_mime_type": "application/json"}
+            )
+            
+            text = response.text
+            
+            # JSON抽出・クリーニング
+            match = re.search(r'\{.*\}', text, re.DOTALL)
+            if match:
+                # 成功したら即座にデータを返して終了（ループを抜ける）
+                return json.loads(match.group(0)), None
+            else:
+                # JSONが見つからない場合は単純パースを試す
+                return json.loads(text), None
+
+        except Exception as e:
+            # 失敗してもログに残すだけで、次のモデルへ進む
+            last_error = str(e)
+            continue 
+
+    # 全てのモデルが全滅した場合のみエラーを返す
+    return None, f"全てのAIモデルで解析に失敗しました。最後の詳細エラー: {last_error}\nAPIキーが正しいか、Google AI Studioでキーが有効になっているか確認してください。"
 
 # ---------------------------------------------------------
 # 4. レポート作成（可視化）
@@ -189,12 +201,11 @@ st.markdown("記録用紙をアップロードしてください。AIがポテ�
 uploaded_file = st.file_uploader("画像をアップロード", type=['jpg', 'jpeg', 'png'])
 
 if uploaded_file:
-    with st.spinner("AIが分析中..."):
+    with st.spinner("AIモデルを検索し、分析しています..."):
         try:
             image = Image.open(uploaded_file)
             image = ImageOps.exif_transpose(image).convert('RGB')
-            # PIL ImageオブジェクトをそのままSDKに渡せるので、BytesIO変換は不要
-            
+            # PIL Imageをそのまま渡す
             data, error_msg = run_ai_analysis(image)
             
             if data:
