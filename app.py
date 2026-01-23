@@ -2,22 +2,31 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import io, requests, json, base64, os, re
+import io, json, os, re
 import matplotlib.font_manager as fm
 from PIL import Image, ImageOps
 
-# ---------------------------------------------------------
-# 1. APIキーの「徹底洗浄」
-# ---------------------------------------------------------
-raw_key = st.secrets.get("GEMINI_API_KEY", "")
-# 改行、スペース、全角スペース、ダブルクォート、シングルクォートを全て削除
-API_KEY = str(raw_key).replace("\n", "").replace(" ", "").replace("　", "").replace('"', "").replace("'", "").strip()
+# ★ここが新兵器：Google公式のAI操作ツールを読み込む
+import google.generativeai as genai
+from google.api_core import exceptions as google_exceptions
 
 # ---------------------------------------------------------
-# 2. フォント設定
+# 1. APIキーの設定（公式SDKに渡す）
+# ---------------------------------------------------------
+raw_key = st.secrets.get("GEMINI_API_KEY", "")
+# キーのクリーニング（改行やゴミを削除）
+API_KEY = str(raw_key).replace("\n", "").replace(" ", "").replace("　", "").replace('"', "").replace("'", "").strip()
+
+# 公式ツールにキーを登録（これで接続設定は完了）
+if API_KEY:
+    genai.configure(api_key=API_KEY)
+
+# ---------------------------------------------------------
+# 2. フォント設定（変更なし）
 # ---------------------------------------------------------
 @st.cache_resource
 def load_japanese_font():
+    import requests # フォント取得のみrequestsを使用
     font_path = "NotoSansJP-Regular.ttf"
     url = "https://raw.githubusercontent.com/google/fonts/main/ofl/notosansjp/NotoSansJP-Regular.ttf"
     try:
@@ -34,69 +43,54 @@ def load_japanese_font():
         return None
 
 # ---------------------------------------------------------
-# 3. AI解析エンジン（モデル名固定・シンプル版）
+# 3. AI解析エンジン（Google公式SDK使用）
 # ---------------------------------------------------------
-def run_ai_analysis(img_bytes):
+def run_ai_analysis(image_obj):
     if not API_KEY:
         return None, "APIキーが設定されていません。Secretsを確認してください。"
 
-    # 画像をBase64変換
-    b64_image = base64.b64encode(img_bytes).decode()
+    # 使用するモデル：安定版の 1.5-flash を指定
+    model = genai.GenerativeModel('gemini-1.5-flash')
 
-    # ★修正点：存在しない「2.5」などは使わず、安定版「1.5-flash」を固定で使う
-    target_model = "gemini-1.5-flash"
-
-    # プロンプト
     prompt = """
-    以下の持久走記録用紙の画像を読み取り、JSONデータのみを出力してください。
+    この「持久走記録用紙」の画像を読み取り、以下のデータを抽出してJSON形式のみで出力してください。
     
     【抽出項目】
-    1. "name": 名前（読めなければ"選手"）
+    1. "name": 名前（読めなければ "選手"）
     2. "long_run_dist": 上段の距離(m)。数値のみ。
     3. "tt_laps": 下段のラップタイム(秒)の数値リスト。
-
+    
     【厳守】
-    JSON以外の文字（```json や 解説）は一切書かないでください。
+    JSONデータ以外の文字（```json や解説）は一切書かないでください。
     """
 
-    # URLの生成（余計な文字が入らないように慎重に作成）
-    url = f"[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/){target_model}:generateContent"
-    
-    # APIキーはクエリパラメータではなくヘッダーに埋め込む（エラー回避の鉄則）
-    headers = {
-        "Content-Type": "application/json",
-        "x-goog-api-key": API_KEY
-    }
-    
-    data_body = {
-        "contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "image/jpeg", "data": b64_image}}]}],
-        "generationConfig": {"response_mime_type": "application/json"}
-    }
-
     try:
-        # POSTリクエスト
-        response = requests.post(url, headers=headers, json=data_body, timeout=30)
+        # ★公式SDKを使ってAIに命令（URLなどは自動処理される）
+        response = model.generate_content(
+            [prompt, image_obj],
+            generation_config={"response_mime_type": "application/json"}
+        )
         
-        # 結果の確認
-        if response.status_code != 200:
-            return None, f"通信エラー ({response.status_code}): {response.text}"
-            
-        result = response.json()
+        # 結果の取り出し
+        text = response.text
         
-        if "candidates" in result and result["candidates"]:
-            raw_text = result["candidates"][0]["content"]["parts"][0]["text"]
-            # JSONだけを抜き出す
-            match = re.search(r'\{.*\}', raw_text, re.DOTALL)
-            if match:
-                return json.loads(match.group(0)), None
-            
-        return None, "AIがデータを読み取れませんでした。"
+        # JSONクリーニング（念のため）
+        match = re.search(r'\{.*\}', text, re.DOTALL)
+        if match:
+            return json.loads(match.group(0)), None
+        else:
+            # そのままパースを試みる
+            return json.loads(text), None
 
+    except google_exceptions.InvalidArgument as e:
+        return None, f"API設定エラー: キーが無効か、画像サイズが大きすぎます。({e})"
+    except google_exceptions.PermissionDenied:
+        return None, "アクセス拒否: APIキーが間違っています。Secretsを再確認してください。"
     except Exception as e:
-        return None, f"システムエラー: {str(e)}"
+        return None, f"解析エラー: {str(e)}"
 
 # ---------------------------------------------------------
-# 4. レポート作成
+# 4. レポート作成（可視化）
 # ---------------------------------------------------------
 def create_report_image(data):
     fp = load_japanese_font()
@@ -186,7 +180,7 @@ def create_report_image(data):
     buf = io.BytesIO(); plt.savefig(buf, format="png", bbox_inches='tight'); return buf
 
 # ---------------------------------------------------------
-# 5. メインUI
+# 5. メイン画面 (UI)
 # ---------------------------------------------------------
 st.set_page_config(page_title="持久走分析", layout="wide")
 st.title("🏃‍♂️ 持久走データ・サイエンス分析")
@@ -199,9 +193,9 @@ if uploaded_file:
         try:
             image = Image.open(uploaded_file)
             image = ImageOps.exif_transpose(image).convert('RGB')
-            img_byte_arr = io.BytesIO(); image.save(img_byte_arr, format='JPEG')
+            # PIL ImageオブジェクトをそのままSDKに渡せるので、BytesIO変換は不要
             
-            data, error_msg = run_ai_analysis(img_byte_arr.getvalue())
+            data, error_msg = run_ai_analysis(image)
             
             if data:
                 st.success("分析完了！")
