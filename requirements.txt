@@ -4,4 +4,3 @@ numpy
 matplotlib
 requests
 Pillow
-fonttools
