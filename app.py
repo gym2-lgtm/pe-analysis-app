@@ -33,49 +33,53 @@ def get_japanese_font_prop():
         return None
 
 # ==========================================
-# 1. AI読み取りエンジン (セキュリティ解除 & 詳細ログ版)
+# 1. AI読み取りエンジン (JSON強制モード & 安全装置解除)
 # ==========================================
 def analyze_image(img_bytes):
     base64_data = base64.b64encode(img_bytes).decode('utf-8')
     
-    # 試すモデルのリスト
+    # JSONモードが使えるモデルに限定
     models_to_try = [
         "gemini-1.5-flash",
-        "gemini-1.5-flash-latest",
-        "gemini-1.5-flash-001",
-        "gemini-1.5-pro"
+        "gemini-1.5-pro",
+        "gemini-1.5-flash-latest"
     ]
     
     prompt = """
-    持久走記録用紙を読み取り、以下のJSON形式で返答せよ。
+    You are a data extraction AI. Extract data from the running record sheet image.
     
-    【構造】
-    用紙は「上段：15分間走(男子)or12分間走(女子)」と「下段：3000m(男子)or2100m(女子)」に分かれている場合がある。
+    Output Format (JSON Only):
+    {
+      "name": "Student Name or '選手'",
+      "long_run_dist": 4050,  // Integer (meters) from the top section (15min/12min run). 0 if empty.
+      "time_trial_laps": [65, 68, 70] // Array of integers (seconds) from the bottom section (3000m/2100m). Empty [] if empty.
+    }
     
-    【必須抽出項目】
-    1. name: 名前 (読めなければ"選手")
-    2. long_run_dist: 上段の合計距離(m)。(例: 4050) ※記載がなければ0
-    3. time_trial_laps: 下段の各周回のタイム(秒)のリスト。(例: [65, 68...])
-       ※分秒表記は秒に変換。累積タイムは区間タイムに直す。
-       ※下段が空欄なら空リスト[]にする。
-    
-    Example Output:
-    {"name": "Yamada", "long_run_dist": 4050, "time_trial_laps": [65, 66, 67]}
+    Rules:
+    - Convert '1\'05' to 65.
+    - If laps are cumulative, calculate splits.
+    - Do not output markdown code blocks. Just raw JSON.
     """
     
     headers = {'Content-Type': 'application/json'}
     
-    # ★修正点: セキュリティフィルターを「なし(BLOCK_NONE)」に設定して、名前の読み取り拒否を防ぐ
+    # ★重要: 安全フィルターを無効化（名前読み取り拒否を防ぐ）
     safety_settings = [
         {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
         {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
         {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
         {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
     ]
+    
+    # ★重要: JSONモードを強制 (おしゃべり禁止)
+    generation_config = {
+        "response_mime_type": "application/json"
+    }
 
     payload = {
         "contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "image/jpeg", "data": base64_data}}]}],
-        "safetySettings": safety_settings
+        "safetySettings": safety_settings,
+        "generationConfig": generation_config
     }
     
     last_error = "詳細なし"
@@ -89,32 +93,39 @@ def analyze_image(img_bytes):
             # エラーチェック
             if "error" in result_json:
                 error_msg = result_json['error']['message'].lower()
-                if any(x in error_msg for x in ["quota", "exhausted", "limit"]):
+                # 制限オーバー(429)なら少し待って次へ
+                if any(x in error_msg for x in ["quota", "exhausted", "limit", "429"]):
                     time.sleep(2)
-                    last_error = f"{model_name} (制限): {error_msg}"
+                    last_error = f"{model_name} (制限超過): {error_msg}"
                     continue
+                # モデルが見つからない場合
                 if "not found" in error_msg:
                     continue
                 
                 return None, f"APIエラー: {result_json['error']['message']}"
             
-            # 候補チェック
+            # 応答チェック
             if 'candidates' in result_json and len(result_json['candidates']) > 0:
                 candidate = result_json['candidates'][0]
                 
-                # ★ここが重要: AIが回答を拒否した理由をチェック
-                if 'finishReason' in candidate and candidate['finishReason'] != 'STOP':
-                    last_error = f"{model_name} 中断理由: {candidate['finishReason']} (SafetyFilter等の可能性)"
-                    continue # 別のモデルで試す
-                
+                # 中断理由チェック
+                if 'finishReason' in candidate and candidate['finishReason'] not in ['STOP', 'MAX_TOKENS']:
+                    last_error = f"{model_name} 中断: {candidate.get('finishReason')} (安全フィルタ等)"
+                    continue
+
                 if 'content' in candidate:
                     text = candidate['content']['parts'][0]['text']
-                    match = re.search(r'\{.*\}', text, re.DOTALL)
-                    if match:
-                        return json.loads(match.group(0)), None
+                    # JSONモードなのでそのままパースできるはずだが、念のためクリーニング
+                    try:
+                        return json.loads(text), None
+                    except json.JSONDecodeError:
+                        # 万が一JSONじゃなかった場合、波括弧を探す
+                        match = re.search(r'\{.*\}', text, re.DOTALL)
+                        if match:
+                            return json.loads(match.group(0)), None
+                        last_error = f"{model_name}: JSON解析失敗。生データ: {text[:50]}..."
             else:
-                # candidatesが空の場合
-                last_error = f"{model_name}: 応答が空でした。JSON: {json.dumps(result_json)}"
+                last_error = f"{model_name}: 応答なし (candidates empty)"
             
         except Exception as e:
             last_error = f"{model_name} 通信エラー: {str(e)}"
@@ -128,16 +139,27 @@ def analyze_image(img_bytes):
 class ScienceEngine:
     def __init__(self, data):
         self.name = data.get("name", "選手")
-        self.long_run_dist = data.get("long_run_dist", 0) 
-        self.tt_laps = np.array(data.get("time_trial_laps", []))
+        # 数値変換の安全策
+        try:
+            self.long_run_dist = float(data.get("long_run_dist", 0) or 0)
+        except: self.long_run_dist = 0
         
-        # 3000mか2100mか判定
+        laps = data.get("time_trial_laps", [])
+        if not isinstance(laps, list): laps = []
+        # 文字列が混ざっていても数値に変換
+        clean_laps = []
+        for x in laps:
+            try: clean_laps.append(float(x))
+            except: pass
+        self.tt_laps = np.array(clean_laps)
+        
+        # 3000m(男子)か2100m(女子)か判定
         self.is_male = True if self.long_run_dist > 3200 else False 
         self.target_dist = 3000 if self.is_male else 2100
         self.long_run_min = 15 if self.is_male else 12
 
     def get_potential_time(self):
-        """リーゲルの公式で予測タイム算出"""
+        """リーゲルの公式"""
         if self.long_run_dist == 0: return None
         t1 = self.long_run_min * 60
         d1 = self.long_run_dist
@@ -161,14 +183,13 @@ class ReportGenerator:
 
         engine = ScienceEngine(data)
         potential_sec = engine.get_potential_time()
-        actual_sec = sum(engine.tt_laps) if len(engine.tt_laps) > 0 else 0
         
         # A4横向き
         fig = plt.figure(figsize=(11.69, 8.27), dpi=100, facecolor='white')
         
         # ヘッダー
         fig.text(0.05, 0.95, f"科学的分析レポート: {engine.name} 選手", fontproperties=fp, fontsize=22, weight='bold', color='#1a237e')
-        fig.text(0.05, 0.92, f"基準: {engine.long_run_min}分間走 {engine.long_run_dist}m", fontproperties=fp, fontsize=12, color='gray')
+        fig.text(0.05, 0.92, f"基準: {engine.long_run_min}分間走 {int(engine.long_run_dist)}m", fontproperties=fp, fontsize=12, color='gray')
 
         # ① 左上: ポテンシャル評価
         ax1 = fig.add_axes([0.05, 0.60, 0.40, 0.25])
@@ -176,15 +197,18 @@ class ReportGenerator:
         ax1.set_title("① 基礎走力からのポテンシャル推計", fontproperties=fp, loc='left', color='#0d47a1', fontsize=14, weight='bold')
         
         vo2 = engine.get_vo2_max()
-        p_m, p_s = divmod(potential_sec, 60) if potential_sec else (0,0)
-        
-        eval_txt = (
-            f"● VO2 Max(最大酸素摂取量): {vo2:.1f} ml/kg/min\n"
-            f"● {engine.target_dist}m 推定限界タイム: {int(p_m)}分{int(p_s):02d}秒\n\n"
-            f"【評価】\n"
-            f"あなたの心肺機能があれば、{engine.target_dist}mを\n"
-            f"『{int(p_m)}分{int(p_s):02d}秒』で走る力があります。"
-        )
+        if potential_sec:
+            p_m, p_s = divmod(potential_sec, 60)
+            eval_txt = (
+                f"● VO2 Max(最大酸素摂取量): {vo2:.1f} ml/kg/min\n"
+                f"● {engine.target_dist}m 推定限界タイム: {int(p_m)}分{int(p_s):02d}秒\n\n"
+                f"【評価】\n"
+                f"あなたの心肺機能があれば、{engine.target_dist}mを\n"
+                f"『{int(p_m)}分{int(p_s):02d}秒』で走る力があります。"
+            )
+        else:
+            eval_txt = "※15分間走のデータが読み取れませんでした。\n上段の距離が明記されているか確認してください。"
+            
         ax1.text(0, 0.8, eval_txt, fontproperties=fp, fontsize=11, va='top', linespacing=1.6)
 
         # ② 右上: 実走ラップ
@@ -197,7 +221,7 @@ class ReportGenerator:
             table_data = []
             for i, lap in enumerate(engine.tt_laps):
                 diff = lap - engine.tt_laps[i-1] if i > 0 else 0
-                mark = "▼DOWN" if diff >= 3 else ("▲UP" if diff <= -2 else "-")
+                mark = "▼DOWN" if diff >= 3 else ("▲UP" if diff <= -2 else "―")
                 table_data.append([f"{i+1}", f"{lap:.1f}", mark])
             if len(table_data) > 10: table_data = table_data[:10]
             
@@ -229,7 +253,7 @@ class ReportGenerator:
             t_table.set_fontsize(11)
             for cell in t_table.get_celld().values(): cell.set_text_props(fontproperties=fp)
         else:
-            ax3.text(0.1, 0.5, "15分走データ不足", fontproperties=fp)
+            ax3.text(0.1, 0.5, "データ不足のため算出不能", fontproperties=fp)
 
         # ④ 右下: アドバイス
         ax4 = fig.add_axes([0.50, 0.10, 0.45, 0.40])
@@ -249,7 +273,7 @@ class ReportGenerator:
         elif potential_sec:
             advice += "実走データがありませんが、左の表があなたの基準です。\nまずは『安全圏』のペースで完走を目指してください。"
         else:
-            advice += "データ不足のため分析できません。"
+            advice += "データ不足のため分析できません。\n(15分間走の記録が見つかりませんでした)"
 
         rect = plt.Rectangle((0, 0), 1, 1, fill=False, edgecolor='#333', linewidth=1, transform=ax4.transAxes)
         ax4.add_patch(rect)
