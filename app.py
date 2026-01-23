@@ -7,150 +7,115 @@ import matplotlib.font_manager as fm
 from PIL import Image, ImageOps
 
 # ---------------------------------------------------------
-# 1. 設定と準備（世界標準の堅牢性）
+# 1. 設定と準備（改行コード削除機能付き）
 # ---------------------------------------------------------
-API_KEY = st.secrets.get("GEMINI_API_KEY", "")
+# APIキー読み込み時に、改行や空白を自動で削除する安全装置(.strip())を追加
+raw_key = st.secrets.get("GEMINI_API_KEY", "")
+API_KEY = raw_key.strip() if raw_key else ""
 
 @st.cache_resource
 def load_japanese_font():
-    """
-    【リスク対策】
-    フォント取得失敗を防ぐため、複数の確実なソース（URL）を順番に試す。
-    1つ目がダメでも2つ目、3つ目で必ず成功させる「多重防御」仕様。
-    """
+    """日本語フォントを確実なソースからダウンロードする"""
     font_path = "NotoSansJP-Regular.ttf"
     
-    # 優先順位付きのダウンロード元リスト
-    # 1. Google Fontsの特定バージョン（リンク切れしない永久固定リンク）
-    # 2. GitHubのミラーサイト（予備）
-    urls = [
-        "https://raw.githubusercontent.com/google/fonts/e3082f4d6d660086395b8d23e5959146522c7a52/ofl/notosansjp/NotoSansJP-Regular.ttf",
-        "https://raw.githubusercontent.com/minoryorg/Noto-Sans-JP/master/fonts/NotoSansJP-Regular.ttf"
-    ]
+    # より確実なURL（raw.githubusercontent.comを使用）
+    url = "https://raw.githubusercontent.com/google/fonts/main/ofl/notosansjp/NotoSansJP-Regular.ttf"
     
-    # すでに正常なファイルがあれば即リターン
-    if os.path.exists(font_path) and os.path.getsize(font_path) > 1000:
+    try:
+        if not os.path.exists(font_path):
+            headers = {"User-Agent": "Mozilla/5.0"}
+            response = requests.get(url, headers=headers, timeout=10)
+            response.raise_for_status()
+            with open(font_path, "wb") as f:
+                f.write(response.content)
+        
         fm.fontManager.addfont(font_path)
         plt.rcParams['font.family'] = 'Noto Sans JP'
         return fm.FontProperties(fname=font_path)
-
-    # 順番にダウンロードを試行
-    for url in urls:
-        try:
-            headers = {"User-Agent": "Mozilla/5.0"} # ブラウザのふりをする（ブロック回避）
-            response = requests.get(url, headers=headers, timeout=15)
-            if response.status_code == 200:
-                with open(font_path, "wb") as f:
-                    f.write(response.content)
-                fm.fontManager.addfont(font_path)
-                plt.rcParams['font.family'] = 'Noto Sans JP'
-                return fm.FontProperties(fname=font_path)
-        except Exception:
-            continue # 次のURLへ
-            
-    # 全滅時は警告を出して英語フォントで続行（アプリはクラッシュさせない）
-    st.warning("⚠️ 日本語フォントの取得に失敗しました。")
-    return None
+    except Exception as e:
+        # フォント取得失敗時は警告を出し、デフォルトフォントで続行
+        return None
 
 # ---------------------------------------------------------
-# 2. AI解析エンジン（自動圧縮＆リトライ機能付き）
+# 2. AI解析エンジン
 # ---------------------------------------------------------
-def run_ai_analysis(image_obj):
-    # ① 鍵チェック
+def run_ai_analysis(img_bytes):
     if not API_KEY:
-        return None, "APIキーが見つかりません。Secretsの設定を確認してください。"
+        return None, "APIキーが設定されていません。Secretsを確認してください。"
 
-    # ② 【リスク対策】画像サイズの自動最適化
-    # 巨大な画像をそのまま送るとタイムアウトするため、長辺1024pxにリサイズ
-    image_obj.thumbnail((1024, 1024))
-    img_byte_arr = io.BytesIO()
-    image_obj.save(img_byte_arr, format='JPEG', quality=85)
-    b64_image = base64.b64encode(img_byte_arr.getvalue()).decode()
+    b64_image = base64.b64encode(img_bytes).decode()
 
-    # ③ モデル選定
-    target_model = "gemini-1.5-flash" # 基本はこれ
+    # モデル選定（自動取得に失敗したら固定値を使う安全設計）
+    target_model = "gemini-1.5-flash"
     try:
-        # 動的にモデルを探すが、失敗しても基本モデルを使う
         models_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={API_KEY}"
         resp = requests.get(models_url, timeout=5)
         if resp.status_code == 200:
-            m_data = resp.json()
-            avail = [m['name'].split('/')[-1] for m in m_data.get('models', []) if 'generateContent' in m.get('supportedGenerationMethods', [])]
-            if avail: target_model = next((m for m in avail if "flash" in m), avail[0])
+            model_data = resp.json()
+            avail = [m['name'].split('/')[-1] for m in model_data.get('models', []) if 'generateContent' in m.get('supportedGenerationMethods', [])]
+            # Flashモデルを優先検索
+            if avail:
+                target_model = next((m for m in avail if "flash" in m), avail[0])
     except:
-        pass # 通信エラーでも、とりあえずデフォルト設定で進む（止まらない設計）
+        pass # エラーでも気にせずデフォルトモデルで進む
 
-    # ④ プロンプト（AIへの指示書）
+    # プロンプト
     prompt = """
-    あなたは陸上競技の専門アナリストです。
+    あなたは陸上競技のデータアナリストです。
     画像から「15分間走(または12分間走)」と「3000m(または2100m)走」の記録を読み取り、JSONデータのみを出力してください。
-
+    
     【ルール】
-    - 必ずJSON形式のみで返すこと。Markdownの装飾(```jsonなど)も不要。
-    - 数値は半角数字に変換すること。
+    - 余計な解説は不要。JSONのみ返す。
+    - 数値は半角数字にする。
 
-    【JSON構造】
+    【出力形式】
     {
       "name": "氏名(読み取れなければ'選手')",
-      "long_run_dist": 15分/12分間走の距離(数値のみ, 例: 4050)。空欄なら0,
+      "long_run_dist": 距離の数値(例: 4050)。空欄なら0,
       "tt_laps": [ラップタイム(秒)の数値リスト]
     }
     """
 
-    url = f"[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/){target_model}:generateContent?key={API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent?key={API_KEY}"
     payload = {
         "contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "image/jpeg", "data": b64_image}}]}],
         "generationConfig": {"response_mime_type": "application/json"}
     }
 
-    # ⑤ 【リスク対策】自動リトライ機能（最大3回）
-    # 一瞬の通信エラーで諦めず、粘り強く再接続する
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            response = requests.post(url, json=payload, timeout=30)
-            result = response.json()
+    try:
+        response = requests.post(url, json=payload, timeout=30)
+        result = response.json()
+        
+        if "error" in result:
+            return None, f"AI解析エラー: {result['error']['message']}"
+        
+        if 'candidates' in result and result['candidates']:
+            raw_text = result['candidates'][0]['content']['parts'][0]['text']
+            match = re.search(r'\{.*\}', raw_text, re.DOTALL)
+            if match:
+                return json.loads(match.group(0)), None
+        
+        return None, "データを読み取れませんでした。"
             
-            if "error" in result:
-                # 致命的なエラーならリトライしても無駄なので即終了
-                return None, f"AIエラー: {result['error']['message']}"
-            
-            # 正常なデータが返ってきたかチェック
-            if 'candidates' in result and result['candidates']:
-                raw_text = result['candidates'][0]['content']['parts'][0]['text']
-                # 強力な正規表現でJSONを摘出
-                match = re.search(r'\{.*\}', raw_text, re.DOTALL)
-                if match:
-                    return json.loads(match.group(0)), None
-            
-            # データが空ならリトライへ
-            
-        except Exception as e:
-            if attempt == max_retries - 1: # 最後までダメだったら
-                return None, f"システムエラー: {str(e)}"
-            time.sleep(1) # 1秒待って再挑戦
-
-    return None, "AIからの応答がありませんでした。画像が鮮明か確認してください。"
+    except Exception as e:
+        return None, f"システムエラー: {str(e)}"
 
 # ---------------------------------------------------------
-# 3. レポート描画エンジン
+# 3. レポート作成（可視化）
 # ---------------------------------------------------------
 def create_report_image(data):
     fp = load_japanese_font()
     font_arg = {'fontproperties': fp} if fp else {}
     
-    # データ安全読み込み
     try: laps = np.array([float(x) for x in data.get("tt_laps", [])])
     except: laps = np.array([])
     try: dist = float(data.get("long_run_dist", 0))
     except: dist = 0.0
     name = data.get("name", "選手")
 
-    # 距離に応じたコース推定
     target_dist = 3000 if dist > 3200 else 2100
     base_time_min = 15 if target_dist == 3000 else 12
 
-    # ポテンシャル計算
     if dist > 0:
         potential_sec = (base_time_min * 60) * (target_dist / dist)**1.06
         vo2_max = max((dist * (12/base_time_min) - 504.9) / 44.73, 0)
@@ -158,7 +123,6 @@ def create_report_image(data):
         potential_sec = None
         vo2_max = 0
 
-    # A4横サイズのキャンバス
     fig = plt.figure(figsize=(11.69, 8.27), facecolor='white', dpi=100)
     
     # ヘッダー
@@ -168,12 +132,11 @@ def create_report_image(data):
     # ① 生理学的ポテンシャル
     ax1 = fig.add_axes([0.05, 0.55, 0.42, 0.30]); ax1.set_axis_off()
     ax1.set_title("① 生理学的ポテンシャル", fontsize=16, loc='left', color='#0d47a1', weight='bold', **font_arg)
-    
     txt = f"■ 推定VO2Max: {vo2_max:.1f} ml/kg/min\n"
     if potential_sec:
         m, s = divmod(potential_sec, 60)
         txt += f"■ {target_dist}m 理論限界タイム: {int(m)}分{int(s):02d}秒\n\n"
-        txt += "【AIコーチの評価】\nこのエンジンの性能なら、上記のタイムで走れる\n潜在能力を持っています。自信を持ちましょう！"
+        txt += "【AIコーチの評価】\n今のエンジン性能なら、上記のタイムを出せる\nポテンシャルがあります。"
     else:
         txt += "※基準記録が不足しています。"
     ax1.text(0.02, 0.85, txt, fontsize=12, va='top', linespacing=1.8, **font_arg)
@@ -238,12 +201,13 @@ st.markdown("記録用紙をアップロードしてください。AIがポテ�
 uploaded_file = st.file_uploader("画像をアップロード", type=['jpg', 'jpeg', 'png'])
 
 if uploaded_file:
-    with st.spinner("AIが画像を解析中... (数秒お待ちください)"):
+    with st.spinner("AIが分析中..."):
         try:
             image = Image.open(uploaded_file)
             image = ImageOps.exif_transpose(image).convert('RGB')
+            img_byte_arr = io.BytesIO(); image.save(img_byte_arr, format='JPEG')
             
-            data, error_msg = run_ai_analysis(image)
+            data, error_msg = run_ai_analysis(img_byte_arr.getvalue())
             
             if data:
                 st.success("分析完了！")
@@ -251,4 +215,4 @@ if uploaded_file:
             else:
                 st.error(error_msg)
         except Exception as e:
-            st.error(f"予期せぬエラー: {e}")
+            st.error(f"エラー: {e}")
