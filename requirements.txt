@@ -2,6 +2,6 @@ streamlit
 pandas
 numpy
 matplotlib
+google-generativeai>=0.7.2
 requests
 Pillow
-google-generativeai>=0.7.0
