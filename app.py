@@ -9,40 +9,32 @@ from PIL import Image, ImageOps
 # --- 1. APIキーの取得 (Secretsから読み込む) ---
 API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 
-# --- 2. 日本語フォント設定 (強化版) ---
+# --- 2. 日本語フォント設定 (安全版) ---
 @st.cache_resource
 def load_fp():
     """日本語フォントを安全に読み込む"""
     fpath = "NotoSansJP-Regular.ttf"
-    # GitHubのRawリンク (urllibだとブロックされることがあるためrequestsを使用)
-    url = "https://github.com/google/fonts/raw/main/ofl/notosansjp/NotoSansJP-Regular.ttf"
-    
+    url = "[https://github.com/google/fonts/raw/main/ofl/notosansjp/NotoSansJP-Regular.ttf](https://github.com/google/fonts/raw/main/ofl/notosansjp/NotoSansJP-Regular.ttf)"
     try:
-        # まだファイルがなければダウンロード
         if not os.path.exists(fpath):
             response = requests.get(url)
-            response.raise_for_status() # エラーならここで例外へ
+            response.raise_for_status()
             with open(fpath, "wb") as f:
                 f.write(response.content)
-        
-        # フォント設定
         fm.fontManager.addfont(fpath)
         plt.rcParams['font.family'] = 'Noto Sans JP'
         return fm.FontProperties(fname=fpath)
-        
     except Exception as e:
-        # 万が一フォントがダメでも、アプリを止めずにNoneを返す
-        print(f"Font Error: {e}") 
         return None
 
-# --- 3. AIエンジン ---
+# --- 3. AIエンジン (JSON抽出強化版) ---
 def run_ai(img_bytes):
     if not API_KEY: return None, "SecretsにGEMINI_API_KEYが設定されていません。"
     b64 = base64.b64encode(img_bytes).decode()
     
     try:
         # モデル自動検出
-        m_list = requests.get(f"https://generativelanguage.googleapis.com/v1beta/models?key={API_KEY}").json()
+        m_list = requests.get(f"[https://generativelanguage.googleapis.com/v1beta/models?key=](https://generativelanguage.googleapis.com/v1beta/models?key=){API_KEY}").json()
         models = [m['name'].split('/')[-1] for m in m_list.get('models', []) if 'generateContent' in m.get('supportedGenerationMethods', [])]
         target = next((m for m in models if "1.5-flash" in m), models[0])
     except: return None, "APIキーが無効、または通信エラーです。"
@@ -56,26 +48,51 @@ def run_ai(img_bytes):
     }
     Note: long_run_dist is from the 15/12min section. tt_laps are split seconds from the 3000/2100m section.
     """
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{target}:generateContent?key={API_KEY}"
+    url = f"[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/){target}:generateContent?key={API_KEY}"
     payload = {
         "contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "image/jpeg", "data": b64}}]}],
         "generationConfig": {"response_mime_type": "application/json"},
         "safetySettings": [{"category": c, "threshold": "BLOCK_NONE"} for c in ["HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH", "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT"]]
     }
+    
     try:
         res = requests.post(url, json=payload, timeout=30).json()
+        
+        # API側のエラーチェック
+        if "error" in res:
+            return None, f"Google API Error: {res['error']['message']}"
+            
+        # 候補チェック
+        if 'candidates' not in res or not res['candidates']:
+            return None, "AIが回答を生成できませんでした（Candidates Empty）。"
+
         raw_text = res['candidates'][0]['content']['parts'][0]['text']
-        return json.loads(raw_text), None
-    except Exception as e: return None, f"解析失敗: AIがデータを読み取れませんでした。"
+        
+        # ★ここが修正ポイント：余計な文字を削除してJSONだけを取り出す
+        match = re.search(r'\{.*\}', raw_text, re.DOTALL)
+        if match:
+            clean_json = match.group(0)
+            return json.loads(clean_json), None
+        else:
+            return None, f"データが見つかりませんでした。生データ: {raw_text[:50]}..."
+            
+    except Exception as e: 
+        return None, f"システムエラー詳細: {str(e)}"
 
 # --- 4. レポート描画 ---
 def draw_report(data):
-    # フォント読み込み（失敗しても止まらない）
     fp = load_fp()
     font_dict = {'fontproperties': fp} if fp else {}
     
-    laps = np.array([float(l) for l in data.get("tt_laps", [])])
-    dist = float(data.get("long_run_dist", 0))
+    # データの安全な取り出し
+    try:
+        laps = np.array([float(l) for l in data.get("tt_laps", [])])
+    except: laps = np.array([])
+    
+    try:
+        dist = float(data.get("long_run_dist", 0))
+    except: dist = 0.0
+
     target_d = 3000 if dist > 3200 else 2100
     long_min = 15 if target_d == 3000 else 12
     
@@ -94,7 +111,7 @@ def draw_report(data):
         txt += f"■{target_d}m 理論限界タイム: {int(p_sec//60)}分{int(p_sec%60):02d}秒\n\n"
         txt += f"君の心肺機能（エンジン）は非常に強力です。\n今の能力なら{target_d}mをこのタイムで走る\nポテンシャルが十分にあります。"
     else:
-        txt += "※15分間走の記録が読み取れませんでした。"
+        txt += "※15分間走の記録が読み取れませんでした。\n用紙の上段に距離が記入されているか確認してください。"
     ax1.text(0, 0.8, txt, fontsize=12, va='top', linespacing=1.8, **font_dict)
 
     # ② 右上: 周回精密データ
