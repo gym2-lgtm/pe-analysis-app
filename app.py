@@ -66,28 +66,25 @@ def run_ai_analysis(image_obj):
         return None, "AIモデル検索失敗"
 
     prompt = """
-    あなたは陸上競技の専門分析官です。画像の「持久走記録用紙」からデータを抽出し、JSONで出力してください。
+    あなたは陸上長距離の専門分析官です。画像の「持久走記録用紙」からデータを抽出し、JSONで出力してください。
     
-    【重要】
-    ・用紙には「複数回（1回目, 2回目...）」の記録がある場合があります。全て抽出してください。
-    ・種目が「15分間走」か「12分間走」かを用紙から慎重に判断してください。
+    【重要ロジック】
+    ・用紙に「15分間走」とあれば、対象は『男子』であり、目標距離は『3000m』です。2100mの話はしないでください。
+    ・用紙に「12分間走」とあれば、対象は『女子』であり、目標距離は『2100m』です。
+    ・複数回の記録がある場合は全て抽出してください。
     
     【JSON構造】
     {
       "name": "選手名",
-      "record_type_minutes": 15 (または 12。数値で),
+      "record_type_minutes": 15 (または 12),
       "records": [
         {
           "attempt": 1,
           "distance": 4050, 
-          "laps": [60, 62, 65...] (各周のラップ秒数)
+          "laps": [60, 62, 65...] (各周ラップ)
         }
       ],
-      "tt_record": {
-         "distance": 3000,
-         "time": "10:30" (なければ null)
-      },
-      "coach_advice": "記録の推移と、ラップタイムの変動（AT閾値など）に着目した専門的なアドバイス。120文字程度。"
+      "coach_advice": "AT閾値(ラップの急激な落ち込み)の分析と、目標距離(男子3000/女子2100)に向けた具体的なペース配分戦略。120文字程度。"
     }
     """
 
@@ -98,7 +95,7 @@ def run_ai_analysis(image_obj):
         return None, f"解析エラー: {e}"
 
 # ==========================================
-# 4. レポート描画（完成版）
+# 4. レポート描画（レイアウト完全調整版）
 # ==========================================
 def create_report_image(data):
     fp = load_japanese_font()
@@ -110,16 +107,17 @@ def create_report_image(data):
     records = data.get("records", [])
     advice = data.get("coach_advice", "")
     
-    # ベスト記録の特定
+    # ベスト記録特定
     best_rec = {"distance": 0, "laps": []}
     if records:
         best_rec = max(records, key=lambda x: float(x.get("distance", 0)))
         
     l_dist = float(best_rec.get("distance", 0))
 
-    # 論理補正
+    # 種目判定ロジック（男子3000m固定ルール適用）
     base_min = int(data.get("record_type_minutes", 15))
     if l_dist > 0 and base_min == 12:
+        # 異常に速い場合は15分に補正
         calc_pace_check = (12 * 60) / (l_dist / 100) 
         if calc_pace_check < 19.5: 
             base_min = 15
@@ -141,37 +139,39 @@ def create_report_image(data):
     t1_sec = base_min * 60
     pred_sec = t1_sec * (target_dist / l_dist)**1.06 if l_dist > 0 else 0
 
-    # ★VO2Maxに基づく追加コメント生成★
+    # ★VO2Maxに基づく専門的コメント生成★
     vo2_comment = ""
     if vo2_max >= 62:
-        vo2_comment = f"【VO2Max: {vo2_max:.1f}】\n全国レベルを狙える極めて高い心肺機能です。スピード持久力は既に完成の域にあります。"
+        vo2_comment = f"【VO2Max: {vo2_max:.1f}】\n酸素運搬能力はエリート水準です。高い有酸素ベースがあり、スピード練習での負荷耐性も十分です。"
     elif vo2_max >= 55:
-        vo2_comment = f"【VO2Max: {vo2_max:.1f}】\n県大会上位レベルの高い数値です。3000m/2100mでも後半の粘りが期待できます。"
+        vo2_comment = f"【VO2Max: {vo2_max:.1f}】\n全身持久力は非常に高いレベルです。ATペース（ややきついペース）での持続力を高めれば更に伸びます。"
     elif vo2_max >= 48:
-        vo2_comment = f"【VO2Max: {vo2_max:.1f}】\n長距離ランナーとしての十分な基礎能力があります。スピード練習でさらに伸びます。"
+        vo2_comment = f"【VO2Max: {vo2_max:.1f}】\n基礎的な有酸素能力は構築できています。ここからインターバル等で心肺に刺激を入れる段階です。"
     else:
-        vo2_comment = f"【VO2Max: {vo2_max:.1f}】\n伸びしろが大きいです。まずは長い距離をゆっくり走り、毛細血管を発達させましょう。"
+        vo2_comment = f"【VO2Max: {vo2_max:.1f}】\n伸びしろ十分です。まずはLSD等で毛細血管を増やし、酸素を取り込む土台を作りましょう。"
 
-    # アドバイスに結合
-    final_advice = advice.replace("。", "。\n") + "\n\n" + vo2_comment
+    # アドバイス結合（不整合回避）
+    clean_advice = advice.replace("。", "。\n").replace("2100m", "") if target_dist == 3000 else advice.replace("。", "。\n")
+    final_advice = clean_advice + "\n\n" + vo2_comment
 
-    # 描画
+    # 描画キャンバス
     fig = plt.figure(figsize=(11.69, 8.27), facecolor='white', dpi=150)
     
+    # タイトル
     fig.text(0.05, 0.95, "ATHLETE PERFORMANCE REPORT", fontsize=16, color='#666', fontproperties=font_bold)
     fig.text(0.05, 0.90, f"{name} 選手 ｜ 持久走能力徹底分析", fontsize=24, color='#000', fontproperties=font_bold)
 
-    # ----------------------------------------
+    # ----------------------------------------------------------------
     # ① 左上：科学的ポテンシャル
-    # ----------------------------------------
-    # 配置調整：高さを少し縮め、下との間隔を確保
-    ax1 = fig.add_axes([0.05, 0.62, 0.35, 0.23]) 
+    # (調整: 高さを抑え、下にスペースを作る)
+    # ----------------------------------------------------------------
+    ax1 = fig.add_axes([0.05, 0.60, 0.35, 0.25])
     ax1.set_axis_off()
     ax1.add_patch(plt.Rectangle((0,0), 1, 1, facecolor='#f8f9fa', edgecolor='#bbb', transform=ax1.transAxes))
 
-    ax1.text(0.05, 0.90, "【① 科学的ポテンシャル診断 (Best)】", fontsize=14, color='#1565c0', fontproperties=font_bold)
+    ax1.text(0.05, 0.92, "【① 科学的ポテンシャル診断 (Best)】", fontsize=14, color='#1565c0', fontproperties=font_bold)
 
-    info_text = f"● 測定記録 ({base_min}分間走)\n"
+    info_text = f"● 自己ベスト ({base_min}分間走)\n"
     info_text += f"   距離: {int(l_dist)} m\n"
     info_text += f"● 最高平均ペース\n"
     info_text += f"   1km換算 : {p1k_m}分{p1k_s:02d}秒 /km\n"
@@ -186,13 +186,13 @@ def create_report_image(data):
     else:
         info_text += "   算出不能"
 
-    ax1.text(0.08, 0.78, info_text, fontsize=11, va='top', linespacing=1.6, fontproperties=font_main)
+    ax1.text(0.08, 0.82, info_text, fontsize=11, va='top', linespacing=1.6, fontproperties=font_main)
 
-    # ----------------------------------------
-    # ② 右側：精密ラップ解析表
-    # ----------------------------------------
-    # 配置調整：右側全体を使う
-    ax2 = fig.add_axes([0.42, 0.25, 0.55, 0.60]) 
+    # ----------------------------------------------------------------
+    # ② 右上〜右下：精密ラップ解析表
+    # (調整: 全体を上に持ち上げる [bottom=0.38, top=0.90])
+    # ----------------------------------------------------------------
+    ax2 = fig.add_axes([0.43, 0.38, 0.52, 0.52]) 
     ax2.set_axis_off()
     ax2.text(0, 1.01, f"【② {base_min}分間走 ラップ推移 & AT閾値】", fontsize=14, color='#0d47a1', fontproperties=font_bold)
 
@@ -251,11 +251,11 @@ def create_report_image(data):
                                 cell.set_text_props(color='#c62828', weight='bold')
             if font_main and r > 0: pass
 
-    # ----------------------------------------
+    # ----------------------------------------------------------------
     # ③ 左下：目標ペース配分表
-    # ----------------------------------------
-    # 配置調整：上部(ax1)との間隔を空けるため、開始位置を下げる
-    ax3 = fig.add_axes([0.05, 0.05, 0.35, 0.48]) 
+    # (調整: 上部との被りを避けるため少し下げる [top=0.50])
+    # ----------------------------------------------------------------
+    ax3 = fig.add_axes([0.05, 0.05, 0.35, 0.45]) 
     ax3.set_axis_off()
     ax3.text(0, 1.01, f"【③ {target_dist}m 目標ペース】", fontsize=14, color='#0d47a1', fontproperties=font_bold)
 
@@ -291,18 +291,19 @@ def create_report_image(data):
             elif c == 3:
                 cell.set_facecolor('#e3f2fd')
 
-    # ----------------------------------------
-    # ④ 右下：専門アドバイス（VO2Max連携）
-    # ----------------------------------------
-    ax4 = fig.add_axes([0.42, 0.05, 0.55, 0.15])
+    # ----------------------------------------------------------------
+    # ④ 右下：専門アドバイス
+    # (調整: 上に持ち上げ、表との隙間を埋める [bottom=0.05, height=0.28])
+    # ----------------------------------------------------------------
+    ax4 = fig.add_axes([0.43, 0.05, 0.52, 0.28])
     ax4.set_axis_off()
     
     rect = plt.Rectangle((0,0), 1, 1, facecolor='#fffde7', edgecolor='#fbc02d', linewidth=2, transform=ax4.transAxes)
     ax4.add_patch(rect)
     
-    ax4.text(0.02, 0.85, "【④ COACH'S EYE / 専門的アドバイス】", fontsize=12, color='#ef6c00', fontproperties=font_bold)
+    ax4.text(0.02, 0.88, "【④ COACH'S EYE / 専門的アドバイス】", fontsize=12, color='#ef6c00', fontproperties=font_bold)
     
-    ax4.text(0.02, 0.65, final_advice, fontsize=10, va='top', linespacing=1.4, fontproperties=font_main)
+    ax4.text(0.02, 0.70, final_advice, fontsize=10, va='top', linespacing=1.4, fontproperties=font_main)
 
     # 保存
     buf = io.BytesIO()
@@ -313,12 +314,12 @@ def create_report_image(data):
 # 5. メインUI
 # ==========================================
 st.title("Data Science Athlete Report")
-st.write("記録用紙（複数回分記載OK）をアップロードしてください。過去のデータと比較分析します。")
+st.write("記録用紙（複数回分記載OK）をアップロードしてください。")
 
 uploaded_file = st.file_uploader("", type=['jpg', 'jpeg', 'png'])
 
 if uploaded_file:
-    with st.spinner("Analyzing..."):
+    with st.spinner("AI分析中..."):
         try:
             image = Image.open(uploaded_file)
             image = ImageOps.exif_transpose(image).convert('RGB')
