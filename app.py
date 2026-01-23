@@ -55,18 +55,55 @@ def load_japanese_font():
     return None
 
 # ==========================================
-# 3. AI解析エンジン
+# 3. AI解析エンジン（モデル自動在庫確認機能）
 # ==========================================
+def get_available_model_name():
+    """
+    ユーザーのアカウントで「確実に使えるモデル」をGoogleに問い合わせて取得する。
+    """
+    try:
+        # 利用可能な全モデルリストを取得
+        all_models = list(genai.list_models())
+        
+        # 画像認識(generateContent)が使えるモデルだけ抽出
+        valid_models = [m.name for m in all_models if 'generateContent' in m.supported_generation_methods]
+        
+        if not valid_models:
+            return None, "利用可能なモデルが見つかりませんでした。"
+
+        # 優先順位リスト（上から順に、リストに存在すればそれを使う）
+        # 1.5-flash系 -> 1.5-pro系 -> 1.0-pro系
+        priority_keywords = [
+            "gemini-1.5-flash",
+            "gemini-1.5-pro",
+            "gemini-pro",
+            "gemini-1.0-pro"
+        ]
+
+        # 1. 優先リストとの完全一致を探す
+        for kw in priority_keywords:
+            for m in valid_models:
+                if kw in m: # 部分一致でもOKとする（例: models/gemini-1.5-flash-001）
+                    return m, None
+        
+        # 2. 見つからなければ、とにかくリストの先頭を使う
+        return valid_models[0], None
+
+    except Exception as e:
+        # 万が一リスト取得自体に失敗した場合は、最も基本的な名前を返す
+        return "models/gemini-pro", f"モデルリスト取得失敗(デフォルト使用): {e}"
+
 def run_ai_analysis(image_obj):
-    # ★安全策：モデル名を「gemini-1.5-flash」に完全固定
-    # これにより、実験的モデル(2.5など)の回数制限(20回/日)に引っかかる事故を防ぎます。
-    # 1.5-flashなら1日1500回まで無料です。
-    target_model = "gemini-1.5-flash"
+    # ★ここで「確実に存在するモデル名」を取得
+    target_model, warning = get_available_model_name()
+    
+    if not target_model:
+        return None, f"AIモデルエラー: {warning}"
 
     try:
         model = genai.GenerativeModel(target_model)
     except:
-        return None, "モデル設定エラー"
+        return None, f"モデル初期化エラー: {target_model}"
 
     prompt = """
     あなたは陸上長距離の専門分析官です。画像の「持久走記録用紙」からデータを抽出し、JSONで出力してください。
@@ -95,7 +132,8 @@ def run_ai_analysis(image_obj):
         response = model.generate_content([prompt, image_obj], generation_config={"response_mime_type": "application/json"})
         return json.loads(response.text), None
     except Exception as e:
-        return None, f"解析エラー: {e}"
+        # エラー詳細を表示してデバッグしやすくする
+        return None, f"解析エラー: {e} (Model: {target_model})"
 
 # ==========================================
 # 4. レポート描画（レイアウト完成版）
@@ -105,7 +143,7 @@ def create_report_image(data):
     font_main = fp if fp else None
     font_bold = fp if fp else None
 
-    # ヘルパー関数：指定文字数で改行する
+    # ヘルパー関数
     def insert_newlines(text, length=30):
         lines = text.split('\n')
         wrapped_lines = []
@@ -267,7 +305,6 @@ def create_report_image(data):
     # ----------------------------------------------------
     ax3 = fig.add_axes([0.05, 0.05, 0.35, 0.55]) 
     ax3.set_axis_off()
-    # タイトル位置調整 (1.005に下げて接近)
     ax3.text(0, 1.005, f"【③ {target_dist}m 目標ペース】", fontsize=14, color='#2980b9', fontproperties=font_bold)
 
     if target_sec > 0:
