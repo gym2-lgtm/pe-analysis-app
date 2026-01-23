@@ -9,36 +9,51 @@ from PIL import Image, ImageOps
 # --- 1. APIキーの取得 (Secretsから読み込む) ---
 API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 
-# --- 2. 日本語フォント設定 (安全版) ---
+# --- 2. 日本語フォント設定 (ブロック回避版) ---
 @st.cache_resource
 def load_fp():
-    """日本語フォントを安全に読み込む"""
     fpath = "NotoSansJP-Regular.ttf"
-    url = "[https://github.com/google/fonts/raw/main/ofl/notosansjp/NotoSansJP-Regular.ttf](https://github.com/google/fonts/raw/main/ofl/notosansjp/NotoSansJP-Regular.ttf)"
+    # GitHubのRawデータURL
+    url = "https://github.com/google/fonts/raw/main/ofl/notosansjp/NotoSansJP-Regular.ttf"
+    
     try:
         if not os.path.exists(fpath):
+            # urllibではなくrequestsを使うことでブロックを回避
             response = requests.get(url)
-            response.raise_for_status()
+            response.raise_for_status() # エラーならここで例外へ
             with open(fpath, "wb") as f:
                 f.write(response.content)
+        
         fm.fontManager.addfont(fpath)
         plt.rcParams['font.family'] = 'Noto Sans JP'
         return fm.FontProperties(fname=fpath)
     except Exception as e:
+        # 万が一フォント読み込みに失敗してもアプリを止めない
         return None
 
 # --- 3. AIエンジン (JSON抽出強化版) ---
 def run_ai(img_bytes):
-    if not API_KEY: return None, "SecretsにGEMINI_API_KEYが設定されていません。"
+    # APIキーのチェック
+    if not API_KEY: 
+        return None, "Secretsの設定が間違っています。中身を消して GEMINI_API_KEY = '...' だけを書いてください。"
+    
     b64 = base64.b64encode(img_bytes).decode()
     
+    # モデル自動検出
     try:
-        # モデル自動検出
-        m_list = requests.get(f"[https://generativelanguage.googleapis.com/v1beta/models?key=](https://generativelanguage.googleapis.com/v1beta/models?key=){API_KEY}").json()
+        url_models = f"https://generativelanguage.googleapis.com/v1beta/models?key={API_KEY}"
+        m_list = requests.get(url_models).json()
+        
+        # エラーハンドリング
+        if "error" in m_list:
+            return None, f"APIキーエラー: {m_list['error']['message']} (新しいキーを作成してください)"
+
         models = [m['name'].split('/')[-1] for m in m_list.get('models', []) if 'generateContent' in m.get('supportedGenerationMethods', [])]
         target = next((m for m in models if "1.5-flash" in m), models[0])
-    except: return None, "APIキーが無効、または通信エラーです。"
+    except Exception as e:
+        return None, f"通信エラー: {str(e)}"
 
+    # プロンプト
     prompt = """
     Extract running data to JSON. Format:
     {
@@ -48,7 +63,8 @@ def run_ai(img_bytes):
     }
     Note: long_run_dist is from the 15/12min section. tt_laps are split seconds from the 3000/2100m section.
     """
-    url = f"[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/){target}:generateContent?key={API_KEY}"
+    
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{target}:generateContent?key={API_KEY}"
     payload = {
         "contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "image/jpeg", "data": b64}}]}],
         "generationConfig": {"response_mime_type": "application/json"},
@@ -58,26 +74,19 @@ def run_ai(img_bytes):
     try:
         res = requests.post(url, json=payload, timeout=30).json()
         
-        # API側のエラーチェック
         if "error" in res:
-            return None, f"Google API Error: {res['error']['message']}"
+            return None, f"AIエラー: {res['error']['message']}"
             
-        # 候補チェック
-        if 'candidates' not in res or not res['candidates']:
-            return None, "AIが回答を生成できませんでした（Candidates Empty）。"
-
         raw_text = res['candidates'][0]['content']['parts'][0]['text']
-        
-        # ★ここが修正ポイント：余計な文字を削除してJSONだけを取り出す
+        # JSON抽出（Markdown除去）
         match = re.search(r'\{.*\}', raw_text, re.DOTALL)
         if match:
-            clean_json = match.group(0)
-            return json.loads(clean_json), None
+            return json.loads(match.group(0)), None
         else:
-            return None, f"データが見つかりませんでした。生データ: {raw_text[:50]}..."
+            return None, "データを読み取れませんでした。"
             
     except Exception as e: 
-        return None, f"システムエラー詳細: {str(e)}"
+        return None, f"システムエラー: {str(e)}"
 
 # --- 4. レポート描画 ---
 def draw_report(data):
@@ -85,12 +94,10 @@ def draw_report(data):
     font_dict = {'fontproperties': fp} if fp else {}
     
     # データの安全な取り出し
-    try:
-        laps = np.array([float(l) for l in data.get("tt_laps", [])])
+    try: laps = np.array([float(l) for l in data.get("tt_laps", [])])
     except: laps = np.array([])
     
-    try:
-        dist = float(data.get("long_run_dist", 0))
+    try: dist = float(data.get("long_run_dist", 0))
     except: dist = 0.0
 
     target_d = 3000 if dist > 3200 else 2100
