@@ -105,7 +105,6 @@ def create_report_image(data):
 
     # ヘルパー関数：指定文字数で改行する
     def insert_newlines(text, length=30):
-        # 既存の改行で分割し、それぞれの行をlength文字で折り返す
         lines = text.split('\n')
         wrapped_lines = []
         for line in lines:
@@ -159,13 +158,13 @@ def create_report_image(data):
 
     vo2_msg = ""
     if vo2_max >= 62:
-        vo2_msg = f"VO2Max {vo2_max:.1f}は、3000mを{int(pm_pot)}分{int(ps_pot):02d}秒前後で走れる極めて高い心肺能力です。自信を持って攻めましょう。"
+        vo2_msg = f"VO2Max {vo2_max:.1f}は、3000mを{int(pm_pot)}分{int(ps_pot):02d}秒前後で走れる心肺能力です。"
     elif vo2_max >= 56:
-        vo2_msg = f"VO2Max {vo2_max:.1f}は、3000mを{int(pm_pot)}分{int(ps_pot):02d}秒で走れるエンジン性能です。今のタイムとの差は『スピードへの慣れ』だけです。"
+        vo2_msg = f"VO2Max {vo2_max:.1f}は、3000mを{int(pm_pot)}分{int(ps_pot):02d}秒で走れるエンジン性能です。"
     elif vo2_max >= 48:
-        vo2_msg = f"VO2Max {vo2_max:.1f}は、長距離ランナーとしての強固な土台を示しています。インターバル走で心肺に負荷をかけ出力を上げましょう。"
+        vo2_msg = f"VO2Max {vo2_max:.1f}は、長距離ランナーとしての強固な土台を示しています。"
     else:
-        vo2_msg = f"現在のVO2Maxは{vo2_max:.1f}です。まずは長い距離をゆっくり走るLSDトレーニングで毛細血管を増やし、土台を作りましょう。"
+        vo2_msg = f"現在のVO2Maxは{vo2_max:.1f}です。まずはLSD等で土台を作りましょう。"
 
     # 描画開始
     fig = plt.figure(figsize=(11.69, 8.27), facecolor='white', dpi=150)
@@ -177,31 +176,29 @@ def create_report_image(data):
     # ----------------------------------------------------
     # ① 左上：科学的ポテンシャル
     # ----------------------------------------------------
-    # 位置調整：bottomを0.66まで上げ、Area3との干渉を避ける
+    # 空白行を削除しコンパクト化
     ax1 = fig.add_axes([0.05, 0.66, 0.35, 0.22]) 
     ax1.set_axis_off()
-    
     ax1.add_patch(plt.Rectangle((0,0), 1, 1, facecolor='#f4f6f7', edgecolor='#bdc3c7', transform=ax1.transAxes))
     ax1.text(0.05, 0.90, "【① 科学的ポテンシャル診断 (Best)】", fontsize=14, color='#2980b9', fontproperties=font_bold)
 
     tm, ts = divmod(target_sec, 60)
     
+    # ★修正：空白行削除
     lines = [
         f"● 測定記録 ({base_min}分間走)",
         f"   距離: {int(l_dist)} m",
         f"   平均ペース: {p1k_m}'{p1k_s:02d}/km",
-        "",
         f"● エンジン性能 (推定VO2Max)",
         f"   {vo2_max:.1f} ml/kg/min",
-        "",
         f"● {target_dist}m 挑戦目標タイム",
         f"   {int(tm)}分{int(ts):02d}秒",
         f"   設定ペース: {int(p1k_tgt//60)}'{int(p1k_tgt%60):02d}/km",
         "   (強度を上げて挑む設定)"
     ]
     
-    # フォントサイズ10.5で行間を調整
-    ax1.text(0.05, 0.82, "\n".join(lines), fontsize=10.5, va='top', linespacing=1.5, fontproperties=font_main)
+    # コンパクトにするため行間を少し広げて配置
+    ax1.text(0.05, 0.82, "\n".join(lines), fontsize=11, va='top', linespacing=1.6, fontproperties=font_main)
 
     # ----------------------------------------------------
     # ② 右上〜中：精密ラップ解析表
@@ -268,11 +265,10 @@ def create_report_image(data):
     # ----------------------------------------------------
     # ③ 左下：目標ペース配分表
     # ----------------------------------------------------
-    # 位置調整：Topを0.60以下に抑える (bottom 0.05 + height 0.55 = 0.60)
-    # Area1 Bottom is 0.66. Gap is 0.06. Perfect.
     ax3 = fig.add_axes([0.05, 0.05, 0.35, 0.55]) 
     ax3.set_axis_off()
-    ax3.text(0, 1.01, f"【③ {target_dist}m 目標ペース】", fontsize=14, color='#2980b9', fontproperties=font_bold)
+    # ★修正：タイトルを下に下げて表に近づける (1.01 -> 1.005)
+    ax3.text(0, 1.005, f"【③ {target_dist}m 目標ペース】", fontsize=14, color='#2980b9', fontproperties=font_bold)
 
     if target_sec > 0:
         levels = [("維持", 1.05), ("PB更新", 1.00), ("限界突破", 0.94)]
@@ -307,23 +303,22 @@ def create_report_image(data):
                 cell.set_facecolor('#d6eaf8')
 
     # ----------------------------------------------------
-    # ④ 右下：専門アドバイス（30文字改行対応）
+    # ④ 右下：専門アドバイス
     # ----------------------------------------------------
     ax4 = fig.add_axes([0.43, 0.05, 0.52, 0.30])
     ax4.set_axis_off()
-    
     ax4.add_patch(plt.Rectangle((0,0), 1, 1, facecolor='#fff9c4', edgecolor='#f1c40f', transform=ax4.transAxes))
-    
     ax4.text(0.02, 0.88, "【④ COACH'S EYE / 専門的アドバイス】", fontsize=13, color='#d35400', fontproperties=font_bold)
     
     # 改行処理
     clean_advice = advice.replace("。", "。\n")
-    final_text_raw = f"■ {target_dist}mへの戦略\n{clean_advice}\n\n■ 生理学的評価\n{vo2_msg}"
+    # ★修正：空白行を削除してコンパクトに
+    final_text_raw = f"■ {target_dist}mへの戦略\n{clean_advice}\n■ 生理学的評価\n{vo2_msg}"
     
-    # 30文字折り返し適用
+    # 30文字折り返し
     final_text_wrapped = insert_newlines(final_text_raw, length=30)
     
-    ax4.text(0.02, 0.82, final_text_wrapped, fontsize=10, va='top', linespacing=1.5, fontproperties=font_main)
+    ax4.text(0.02, 0.80, final_text_wrapped, fontsize=10, va='top', linespacing=1.5, fontproperties=font_main)
 
     # 保存
     buf = io.BytesIO()
