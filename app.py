@@ -28,11 +28,10 @@ genai.configure(api_key=API_KEY)
 # ==========================================
 @st.cache_resource
 def get_font_prop():
-    # サーバーに日本語フォントがないため、Googleから直接ダウンロードして使う
     font_filename = "NotoSansJP-Regular.ttf"
     url = "https://raw.githubusercontent.com/google/fonts/main/ofl/notosansjp/NotoSansJP-Regular.ttf"
     
-    if not os.path.exists(font_filename):
+    if not os.path.exists(font_filename) or os.path.getsize(font_filename) < 1000:
         try:
             response = requests.get(url, timeout=10)
             if response.status_code == 200:
@@ -77,23 +76,28 @@ def run_ai_analysis(image_obj):
               "laps": [91, 87, 89...]
             }
           ],
-          "coach_advice": "アドバイステキスト"
+          "coach_advice": "ここには必ず、選手の記録に基づいた具体的で前向きなアドバイスを120文字程度で記述してください。"
         }
         """
         response = model.generate_content([prompt, image_obj], generation_config={"response_mime_type": "application/json"})
+        
         raw_text = response.text.replace("```json", "").replace("```", "").strip()
         try:
             data = json.loads(raw_text)
         except:
             return None, "データ解析失敗"
 
+        # リストで返ってきた場合のガード
         if isinstance(data, list):
-            data = {"records": data, "name": "選手", "record_type_minutes": 15, "race_category": "time", "coach_advice": "解析完了"}
+            data = {"records": data, "name": "選手", "record_type_minutes": 15, "race_category": "time", "coach_advice": ""}
 
         # 自動補正ロジック
         max_elapsed_sec = 0
         records = data.get("records", [])
-        if not isinstance(records, list): records = []
+        if not isinstance(records, list): 
+            records = []
+            data["records"] = [] # 安全のため初期化
+
         for rec in records:
             laps = rec.get("laps", [])
             if laps:
@@ -116,10 +120,9 @@ def run_ai_analysis(image_obj):
         return None, f"エラー: {e}"
 
 # ==========================================
-# 4. レポート描画（フォント強制適用）
+# 4. レポート描画（バックアップコーチ機能搭載）
 # ==========================================
 def create_report_image(data):
-    # 日本語フォント読み込み
     fp = get_font_prop()
     
     def insert_newlines(text, length=30):
@@ -128,12 +131,11 @@ def create_report_image(data):
 
     name = data.get("name", "選手")
     records = data.get("records", [])
-    advice = data.get("coach_advice", "")
     race_cat = data.get("race_category", "time")
     base_min = int(data.get("record_type_minutes", 15))
     target_dist = 3000 if base_min == 15 else 2100
 
-    # データ計算
+    # ベスト記録計算
     best_rec = {}
     best_l_dist = 0
     best_total_sec = 0
@@ -158,6 +160,7 @@ def create_report_image(data):
                 best_total_sec = base_min * 60
             except: pass
 
+    # VO2Max & 指標計算
     pace_sec = best_total_sec / (best_l_dist/1000) if best_l_dist>0 else 0
     avg_pace = f"{int(pace_sec//60)}'{int(pace_sec%60):02d}/km"
     
@@ -181,10 +184,23 @@ def create_report_image(data):
     pm, ps = divmod(pot_3k, 60)
     vo2_msg = f"VO2Max {vo2_max:.1f}。3000m換算{int(pm)}分{int(ps):02d}秒相当。" if vo2_max>0 else "計測不能"
 
+    # --- ★バックアップコーチ機能 ---
+    # AIのアドバイスが空(None or "")だった場合、プログラムが自動生成する
+    raw_advice = data.get("coach_advice")
+    
+    if not raw_advice: # Noneまたは空文字の場合
+        if vo2_max >= 60:
+            advice = "素晴らしい心肺機能です。今の走力は県大会レベルに匹敵します。さらなる記録更新のため、ラストスパートの切り替えを意識しましょう。"
+        elif vo2_max >= 50:
+            advice = "安定したペース配分ができています。中盤の粘りが強化されれば、大幅な自己ベスト更新も可能です。AT閾値を意識した練習を取り入れましょう。"
+        else:
+            advice = "まずは一定のペースで走り切るスタミナ作りから始めましょう。無理のないペース設定で、距離を踏むことが成長への近道です。"
+    else:
+        advice = str(raw_advice) # AIの言葉を採用
+
     # --- 描画開始 ---
     fig = plt.figure(figsize=(11.69, 8.27), facecolor='white', dpi=150)
     
-    # ★ここが重要：fontproperties=fp を全てのテキストに渡す
     t_mode = f"{target_dist}m走" if race_cat=="distance" else f"{base_min}分間走"
     fig.text(0.05, 0.96, "ATHLETE PERFORMANCE REPORT", fontsize=16, color='#7f8c8d', fontproperties=fp)
     fig.text(0.05, 0.91, f"{name} 選手 ｜ {t_mode} 能力分析", fontsize=26, color='#2c3e50', weight='bold', fontproperties=fp)
@@ -243,7 +259,6 @@ def create_report_image(data):
         table = ax2.table(cellText=cell_data, colLabels=cols, loc='center', cellLoc='center')
         table.auto_set_font_size(False); table.set_fontsize(9); table.scale(1, 1.25)
         
-        # フォント適用
         for (r,c), cell in table.get_celld().items():
             cell.set_text_props(fontproperties=fp)
             if r==0:
