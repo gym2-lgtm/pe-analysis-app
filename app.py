@@ -23,11 +23,13 @@ if not API_KEY:
 
 genai.configure(api_key=API_KEY)
 
-# 日本語フォントの確保
+# 日本語フォントの確保（Streamlit Cloud対策・最強版）
 @st.cache_resource
 def load_japanese_font():
     font_filename = "JP_Font.ttf"
-    url = "[https://moji.or.jp/wp-content/ipafont/IPAexfont/ipaexg00401.ttf](https://moji.or.jp/wp-content/ipafont/IPAexfont/ipaexg00401.ttf)"
+    url = "https://moji.or.jp/wp-content/ipafont/IPAexfont/ipaexg00401.ttf"
+    
+    # フォントファイルがなければダウンロード
     if not os.path.exists(font_filename):
         try:
             response = requests.get(url, timeout=20)
@@ -37,21 +39,19 @@ def load_japanese_font():
         except:
             pass
     
+    # フォントプロパティを作成して返す
     if os.path.exists(font_filename):
-        fm.fontManager.addfont(font_filename)
-        plt.rcParams['font.family'] = 'IPAexGothic'
         return fm.FontProperties(fname=font_filename)
     return None
 
 # ==========================================
-# 2. AI解析エンジン（エラー耐性強化版）
+# 2. AI解析エンジン（エラー耐性・最強版）
 # ==========================================
 def get_safe_model_name():
     try:
         models = list(genai.list_models())
         valid_models = [m.name for m in models if 'generateContent' in m.supported_generation_methods]
         
-        # 優先順位: 1.5-flash -> 1.5-pro
         for m in valid_models:
             if "1.5-flash" in m: return m
         for m in valid_models:
@@ -104,26 +104,36 @@ def run_ai_analysis(image_obj):
             generation_config={"response_mime_type": "application/json"}
         )
         
-        # ★修正：JSONクリーニングと型チェック
+        # ★エラー対策：JSONクリーニング
         raw_text = response.text
-        # マークダウンの除去
         clean_text = raw_text.replace("```json", "").replace("```", "").strip()
         
         try:
             data = json.loads(clean_text)
         except:
             # 失敗したら元のテキストでトライ
-            data = json.loads(raw_text)
+            try:
+                data = json.loads(raw_text)
+            except:
+                return None, "AIの応答を解析できませんでした。"
 
-        # ★修正：リストが返ってきた場合の強制変換（AttributeError対策）
+        # ★エラー対策：リスト型が返ってきた場合の強制変換
         if isinstance(data, list):
-            data = {"records": data, "name": "選手", "record_type_minutes": 15}
+            # AIがリストだけ返してきた場合、それをrecordsとして包み込む
+            data = {
+                "records": data,
+                "name": "選手",
+                "record_type_minutes": 15,
+                "race_category": "time",
+                "coach_advice": "データからアドバイスを生成できませんでした。"
+            }
 
         # タイムキーパー機能（自動補正）
         max_elapsed_sec = 0
         records = data.get("records", [])
-        if not isinstance(records, list): #念のため
+        if not isinstance(records, list): 
             records = []
+            data["records"] = []
 
         for rec in records:
             laps = rec.get("laps", [])
@@ -133,9 +143,10 @@ def run_ai_analysis(image_obj):
             
             if "total_time_str" in rec:
                 try:
-                    t_parts = rec["total_time_str"].replace("分",":").replace("秒","").split(":")
-                    t_sec = int(t_parts[0])*60 + int(t_parts[1])
-                    if t_sec > max_elapsed_sec: max_elapsed_sec = t_sec
+                    t_parts = str(rec["total_time_str"]).replace("分",":").replace("秒","").split(":")
+                    if len(t_parts) >= 2:
+                        t_sec = int(t_parts[0])*60 + int(t_parts[1])
+                        if t_sec > max_elapsed_sec: max_elapsed_sec = t_sec
                 except: pass
         
         if max_elapsed_sec > 750:
@@ -159,13 +170,14 @@ def run_ai_analysis(image_obj):
         return None, f"解析エラー: {e}"
 
 # ==========================================
-# 3. レポート描画
+# 3. レポート描画（文字化け・エラー対策済み）
 # ==========================================
 def create_report_image(data):
+    # フォントプロパティの取得
     fp = load_japanese_font()
-    font_prop = fp if fp else None
     
     def insert_newlines(text, length=30):
+        if not text: return ""
         return '\n'.join([line[i:i+length] for line in text.split('\n') for i in range(0, len(line), length)])
 
     name = data.get("name", "選手")
@@ -185,17 +197,30 @@ def create_report_image(data):
             def get_sec(r):
                 if "total_time_str" in r:
                     try:
-                        p = r["total_time_str"].replace("分",":").replace("秒","").split(":")
-                        return int(p[0])*60 + int(p[1])
+                        p = str(r["total_time_str"]).replace("分",":").replace("秒","").split(":")
+                        if len(p) >= 2:
+                            return int(p[0])*60 + int(p[1])
                     except: pass
                 return sum(r.get("laps", []))
-            best_rec = min(records, key=lambda x: get_sec(x) if get_sec(x) > 0 else 9999)
-            best_total_sec = get_sec(best_rec)
-            best_l_dist = target_dist
+            
+            # リストが空でないか確認してからmin実行
+            try:
+                best_rec = min(records, key=lambda x: get_sec(x) if get_sec(x) > 0 else 9999)
+                best_total_sec = get_sec(best_rec)
+                best_l_dist = target_dist
+            except:
+                best_rec = records[0]
+                best_total_sec = 0
+                best_l_dist = target_dist
         else:
-            best_rec = max(records, key=lambda x: float(str(x.get("total_dist", 0)).replace("m","")))
-            best_l_dist = float(str(best_rec.get("total_dist", 0)).replace("m",""))
-            best_total_sec = base_min * 60
+            try:
+                best_rec = max(records, key=lambda x: float(str(x.get("total_dist", 0)).replace("m","")))
+                best_l_dist = float(str(best_rec.get("total_dist", 0)).replace("m",""))
+                best_total_sec = base_min * 60
+            except:
+                best_rec = records[0]
+                best_l_dist = 0
+                best_total_sec = base_min * 60
 
     # 計算
     if best_total_sec > 0 and best_l_dist > 0:
@@ -232,14 +257,15 @@ def create_report_image(data):
     fig = plt.figure(figsize=(11.69, 8.27), facecolor='white', dpi=150)
     
     title_mode = f"{target_dist}m走 (実戦)" if race_cat == "distance" else f"{base_min}分間走 (測定)"
-    fig.text(0.05, 0.96, "ATHLETE PERFORMANCE REPORT", fontsize=16, color='#7f8c8d', fontproperties=font_prop)
-    fig.text(0.05, 0.91, f"{name} 選手 ｜ {title_mode} 能力分析", fontsize=26, color='#2c3e50', weight='bold', fontproperties=font_prop)
+    # ★修正：すべてのテキストに fontproperties=fp を明示的に指定
+    fig.text(0.05, 0.96, "ATHLETE PERFORMANCE REPORT", fontsize=16, color='#7f8c8d', fontproperties=fp)
+    fig.text(0.05, 0.91, f"{name} 選手 ｜ {title_mode} 能力分析", fontsize=26, color='#2c3e50', weight='bold', fontproperties=fp)
 
     # エリア1
     ax1 = fig.add_axes([0.05, 0.62, 0.35, 0.25]) 
     ax1.set_axis_off()
     ax1.add_patch(patches.Rectangle((0,0), 1, 1, facecolor='#f4f6f7', edgecolor='#bdc3c7', transform=ax1.transAxes))
-    ax1.text(0.05, 0.90, "【① RESULT / 最高記録(Best)】", fontsize=14, color='#2980b9', weight='bold', fontproperties=font_prop)
+    ax1.text(0.05, 0.90, "【① RESULT / 最高記録(Best)】", fontsize=14, color='#2980b9', weight='bold', fontproperties=fp)
     
     rec_val = f"{int(best_l_dist)} m" if race_cat=="time" else f"{int(best_total_sec//60)}'{int(best_total_sec%60):02d}"
     
@@ -255,12 +281,12 @@ def create_report_image(data):
         f"   {ref_time_str}",
         f"   想定ペース: {ref_pace_str}"
     ]
-    ax1.text(0.05, 0.82, "\n".join(lines), fontsize=10.5, va='top', linespacing=1.5, fontproperties=font_prop)
+    ax1.text(0.05, 0.82, "\n".join(lines), fontsize=10.5, va='top', linespacing=1.5, fontproperties=fp)
 
     # エリア2
     ax2 = fig.add_axes([0.45, 0.38, 0.50, 0.45])
     ax2.set_axis_off()
-    ax2.text(0, 1.02, f"【② ラップ推移 & AT閾値判定】", fontsize=14, color='#2980b9', weight='bold', fontproperties=font_prop)
+    ax2.text(0, 1.02, f"【② ラップ推移 & AT閾値判定】", fontsize=14, color='#2980b9', weight='bold', fontproperties=fp)
 
     if records:
         cols = ["周"]; cell_data = []; AT_THRESHOLD = 3.0
@@ -286,23 +312,29 @@ def create_report_image(data):
 
         table = ax2.table(cellText=cell_data, colLabels=cols, loc='center', cellLoc='center')
         table.auto_set_font_size(False); table.set_fontsize(9); table.scale(1, 1.25)
+        
+        # ★修正：テーブル内のセルにも確実にフォント適用
         for (r, c), cell in table.get_celld().items():
-            if r == 0: cell.set_facecolor('#34495e'); cell.set_text_props(color='white')
-            elif r == len(cell_data): cell.set_facecolor('#ecf0f1'); cell.set_text_props(weight='bold')
+            cell.set_text_props(fontproperties=fp)
+            if r == 0: 
+                cell.set_facecolor('#34495e')
+                cell.set_text_props(color='white', fontproperties=fp)
+            elif r == len(cell_data): 
+                cell.set_facecolor('#ecf0f1')
+                cell.set_text_props(weight='bold', fontproperties=fp)
             elif c > 0 and c % 2 != 0: 
                 rec_idx = (c - 1) // 2
                 laps = records[rec_idx].get("laps", [])
                 if r > 1 and r-1 < len(laps):
                     curr = laps[r-1]; prev = laps[r-2]
                     if curr - prev >= AT_THRESHOLD:
-                         cell.set_facecolor('#fadbd8'); cell.set_text_props(color='#c0392b', weight='bold')
-            
-            if font_prop: cell.set_text_props(fontproperties=font_prop)
+                         cell.set_facecolor('#fadbd8')
+                         cell.set_text_props(color='#c0392b', weight='bold', fontproperties=fp)
 
     # エリア3
     ax3 = fig.add_axes([0.05, 0.05, 0.35, 0.45]) 
     ax3.set_axis_off()
-    ax3.text(0, 1.01, f"【③ {target_dist}m 目標ラップ表】", fontsize=14, color='#2980b9', weight='bold', fontproperties=font_prop)
+    ax3.text(0, 1.01, f"【③ {target_dist}m 目標ラップ表】", fontsize=14, color='#2980b9', weight='bold', fontproperties=fp)
     
     levels = [("維持", 1.05), ("目標", 1.00), ("突破", 0.94)]
     cols3 = ["周回"] + [l[0] for l in levels]
@@ -322,22 +354,28 @@ def create_report_image(data):
         
     table3 = ax3.table(cellText=rows3, colLabels=cols3, loc='upper center', cellLoc='center')
     table3.auto_set_font_size(False); table3.set_fontsize(10); table3.scale(1, 1.55)
+    
+    # ★修正：テーブル3にもフォント適用
     for (r, c), cell in table3.get_celld().items():
-        if r == 0: cell.set_facecolor('#2980b9'); cell.set_text_props(color='white')
+        cell.set_text_props(fontproperties=fp)
+        if r == 0: 
+            cell.set_facecolor('#2980b9')
+            cell.set_text_props(color='white', fontproperties=fp)
         elif c == 3: cell.set_facecolor('#d6eaf8')
-        if font_prop: cell.set_text_props(fontproperties=font_prop)
 
     # エリア4
     ax4 = fig.add_axes([0.43, 0.05, 0.52, 0.30])
     ax4.set_axis_off()
     ax4.add_patch(patches.Rectangle((0,0), 1, 1, facecolor='#fff9c4', edgecolor='#f1c40f', transform=ax4.transAxes))
-    ax4.text(0.02, 0.88, "【④ COACH'S EYE / レース講評】", fontsize=13, color='#d35400', weight='bold', fontproperties=font_prop)
+    ax4.text(0.02, 0.88, "【④ COACH'S EYE / レース講評】", fontsize=13, color='#d35400', weight='bold', fontproperties=fp)
     
-    # ★修正箇所：SyntaxError対策。処理を分割
-    clean_advice = advice.replace('。', '。\n')
-    final_text = f"■ アドバイス\n{clean_advice}\n\n■ 生理学的評価\n{vo2_msg}"
+    # ★修正：SyntaxErrorの原因となったf-string内の改行処理を分離
+    formatted_advice = advice.replace('。', '。\n')
+    final_text_raw = f"■ アドバイス\n{formatted_advice}\n\n■ 生理学的評価\n{vo2_msg}"
     
-    ax4.text(0.02, 0.82, insert_newlines(final_text, 30), fontsize=10, va='top', linespacing=1.5, fontproperties=font_prop)
+    final_text_ready = insert_newlines(final_text_raw, 30)
+    
+    ax4.text(0.02, 0.82, final_text_ready, fontsize=10, va='top', linespacing=1.5, fontproperties=fp)
 
     # 保存
     buf = io.BytesIO()
