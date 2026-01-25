@@ -23,10 +23,12 @@ if not API_KEY:
 
 genai.configure(api_key=API_KEY)
 
-# 日本語フォントをダウンロードし、プロパティオブジェクトを作成
+# ★最重要：日本語フォントをダウンロードし、プロパティオブジェクトを作成
+# これを各描画関数に直接渡すことで、環境依存の文字化けを回避する
 @st.cache_resource
 def get_font_prop():
     font_filename = "JP_Font.ttf"
+    # IPAexゴシック（安定した日本語フォント）
     url = "https://moji.or.jp/wp-content/ipafont/IPAexfont/ipaexg00401.ttf"
     
     # フォントファイルがない場合はダウンロード
@@ -39,13 +41,13 @@ def get_font_prop():
         except:
             pass
             
-    # フォントプロパティを生成して返す（これを全ての描画関数に渡す）
+    # フォントプロパティを生成して返す
     if os.path.exists(font_filename):
         return fm.FontProperties(fname=font_filename)
     return None
 
 # ==========================================
-# 2. AI解析エンジン（データ構造ガード付き）
+# 2. AI解析エンジン（エラー耐性強化）
 # ==========================================
 def get_safe_model_name():
     try:
@@ -96,7 +98,7 @@ def run_ai_analysis(image_obj):
         except:
             return None, "データの読み取りに失敗しました。"
 
-        # ★重要：リストが返ってきた場合の強制型変換（AttributeError対策）
+        # ★AttributeError対策：リストが返ってきた場合の強制型変換
         if isinstance(data, list):
             data = {
                 "records": data,
@@ -109,7 +111,9 @@ def run_ai_analysis(image_obj):
         # タイムキーパー機能（自動補正）
         max_elapsed_sec = 0
         records = data.get("records", [])
-        if not isinstance(records, list): records = []
+        if not isinstance(records, list): 
+            records = []
+            data["records"] = []
 
         for rec in records:
             laps = rec.get("laps", [])
@@ -152,6 +156,7 @@ def run_ai_analysis(image_obj):
 # ==========================================
 def create_report_image(data):
     # ★重要：ここでフォントプロパティを取得
+    # 以降、全てのテキスト描画で fontproperties=fp を指定する
     fp = get_font_prop()
     
     # 改行ヘルパー
@@ -192,7 +197,10 @@ def create_report_image(data):
                 best_rec = max(records, key=get_dist)
                 best_l_dist = get_dist(best_rec)
                 best_total_sec = base_min * 60
-            except: pass
+            except:
+                best_rec = records[0]
+                best_l_dist = 0
+                best_total_sec = base_min * 60
 
     # 計算
     pace_sec_per_km = 0
@@ -228,7 +236,7 @@ def create_report_image(data):
     # 描画
     fig = plt.figure(figsize=(11.69, 8.27), facecolor='white', dpi=150)
     
-    # ★すべての text() メソッドに fontproperties=fp を渡す！これが文字化け防止の鍵
+    # ★修正：タイトル等のテキストに必ず fontproperties=fp を渡す
     title_mode = f"{target_dist}m走" if race_cat == "distance" else f"{base_min}分間走"
     fig.text(0.05, 0.96, "ATHLETE PERFORMANCE REPORT", fontsize=16, color='#7f8c8d', fontproperties=fp)
     fig.text(0.05, 0.91, f"{name} 選手 ｜ {title_mode} 能力分析", fontsize=26, color='#2c3e50', weight='bold', fontproperties=fp)
@@ -287,9 +295,9 @@ def create_report_image(data):
         table = ax2.table(cellText=cell_data, colLabels=cols, loc='center', cellLoc='center')
         table.auto_set_font_size(False); table.set_fontsize(9); table.scale(1, 1.25)
         
-        # テーブル内のフォント適用
+        # ★修正：テーブル内のセルにも確実にフォント適用
         for (r, c), cell in table.get_celld().items():
-            cell.set_text_props(fontproperties=fp) # ★ここが最重要
+            cell.set_text_props(fontproperties=fp)
             if r == 0: 
                 cell.set_facecolor('#34495e')
                 cell.set_text_props(color='white', fontproperties=fp)
@@ -327,8 +335,10 @@ def create_report_image(data):
         
     table3 = ax3.table(cellText=rows3, colLabels=cols3, loc='upper center', cellLoc='center')
     table3.auto_set_font_size(False); table3.set_fontsize(10); table3.scale(1, 1.55)
+    
+    # ★修正：テーブル3にもフォント適用
     for (r, c), cell in table3.get_celld().items():
-        cell.set_text_props(fontproperties=fp) # ★テーブル3も忘れずに
+        cell.set_text_props(fontproperties=fp)
         if r == 0: 
             cell.set_facecolor('#2980b9')
             cell.set_text_props(color='white', fontproperties=fp)
@@ -340,8 +350,9 @@ def create_report_image(data):
     ax4.add_patch(patches.Rectangle((0,0), 1, 1, facecolor='#fff9c4', edgecolor='#f1c40f', transform=ax4.transAxes))
     ax4.text(0.02, 0.88, "【④ COACH'S EYE / レース講評】", fontsize=13, color='#d35400', weight='bold', fontproperties=fp)
     
-    clean_advice = advice.replace('。', '。\n')
-    final_text_raw = f"■ アドバイス\n{clean_advice}\n\n■ 生理学的評価\n{vo2_msg}"
+    # ★修正：SyntaxError対策。f-string内でバックスラッシュを使わず、事前に置換
+    formatted_advice = advice.replace('。', '。\n')
+    final_text_raw = f"■ アドバイス\n{formatted_advice}\n\n■ 生理学的評価\n{vo2_msg}"
     final_text_ready = insert_newlines(final_text_raw, 30)
     
     ax4.text(0.02, 0.82, final_text_ready, fontsize=10, va='top', linespacing=1.5, fontproperties=fp)
@@ -355,12 +366,12 @@ def create_report_image(data):
 # 4. メインUI
 # ==========================================
 st.title("Data Science Athlete Report")
-st.write("記録用紙をアップロードしてください。")
+st.write("記録用紙をアップロードしてください。（自動補正機能搭載）")
 
 uploaded_file = st.file_uploader("", type=['jpg', 'jpeg', 'png'])
 
 if uploaded_file:
-    with st.spinner("AI解析中..."):
+    with st.spinner("AI解析中（タイムキーパー作動中）..."):
         try:
             image = Image.open(uploaded_file)
             image = ImageOps.exif_transpose(image).convert('RGB')
