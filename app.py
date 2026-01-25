@@ -27,7 +27,7 @@ genai.configure(api_key=API_KEY)
 @st.cache_resource
 def load_japanese_font():
     font_filename = "JP_Font.ttf"
-    url = "https://moji.or.jp/wp-content/ipafont/IPAexfont/ipaexg00401.ttf"
+    url = "[https://moji.or.jp/wp-content/ipafont/IPAexfont/ipaexg00401.ttf](https://moji.or.jp/wp-content/ipafont/IPAexfont/ipaexg00401.ttf)"
     if not os.path.exists(font_filename):
         try:
             response = requests.get(url, timeout=20)
@@ -44,13 +44,14 @@ def load_japanese_font():
     return None
 
 # ==========================================
-# 2. AI解析エンジン
+# 2. AI解析エンジン（エラー耐性強化版）
 # ==========================================
 def get_safe_model_name():
     try:
         models = list(genai.list_models())
         valid_models = [m.name for m in models if 'generateContent' in m.supported_generation_methods]
         
+        # 優先順位: 1.5-flash -> 1.5-pro
         for m in valid_models:
             if "1.5-flash" in m: return m
         for m in valid_models:
@@ -102,11 +103,29 @@ def run_ai_analysis(image_obj):
             [prompt, image_obj], 
             generation_config={"response_mime_type": "application/json"}
         )
-        data = json.loads(response.text)
+        
+        # ★修正：JSONクリーニングと型チェック
+        raw_text = response.text
+        # マークダウンの除去
+        clean_text = raw_text.replace("```json", "").replace("```", "").strip()
+        
+        try:
+            data = json.loads(clean_text)
+        except:
+            # 失敗したら元のテキストでトライ
+            data = json.loads(raw_text)
+
+        # ★修正：リストが返ってきた場合の強制変換（AttributeError対策）
+        if isinstance(data, list):
+            data = {"records": data, "name": "選手", "record_type_minutes": 15}
 
         # タイムキーパー機能（自動補正）
         max_elapsed_sec = 0
-        for rec in data.get("records", []):
+        records = data.get("records", [])
+        if not isinstance(records, list): #念のため
+            records = []
+
+        for rec in records:
             laps = rec.get("laps", [])
             if laps:
                 total_lap_sec = sum(laps)
@@ -125,9 +144,9 @@ def run_ai_analysis(image_obj):
                 data["record_type_minutes"] = 15
         
         dist_check = 0
-        if data.get("records"):
+        if records:
             try:
-                dist_check = float(str(data["records"][0].get("total_dist", 0)).replace("m",""))
+                dist_check = float(str(records[0].get("total_dist", 0)).replace("m",""))
             except: pass
             
         if dist_check > 3200 and data.get("record_type_minutes") == 12:
@@ -314,9 +333,9 @@ def create_report_image(data):
     ax4.add_patch(patches.Rectangle((0,0), 1, 1, facecolor='#fff9c4', edgecolor='#f1c40f', transform=ax4.transAxes))
     ax4.text(0.02, 0.88, "【④ COACH'S EYE / レース講評】", fontsize=13, color='#d35400', weight='bold', fontproperties=font_prop)
     
-    # ★修正箇所：f-string内でのバックスラッシュ禁止回避
-    formatted_advice = advice.replace('。', '。\n')
-    final_text = f"■ アドバイス\n{formatted_advice}\n\n■ 生理学的評価\n{vo2_msg}"
+    # ★修正箇所：SyntaxError対策。処理を分割
+    clean_advice = advice.replace('。', '。\n')
+    final_text = f"■ アドバイス\n{clean_advice}\n\n■ 生理学的評価\n{vo2_msg}"
     
     ax4.text(0.02, 0.82, insert_newlines(final_text, 30), fontsize=10, va='top', linespacing=1.5, fontproperties=font_prop)
 
