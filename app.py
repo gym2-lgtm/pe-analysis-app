@@ -23,11 +23,10 @@ if not API_KEY:
 
 genai.configure(api_key=API_KEY)
 
-# 日本語フォントの確保（Streamlit Cloud対策）
+# 日本語フォントの確保
 @st.cache_resource
 def load_japanese_font():
     font_filename = "JP_Font.ttf"
-    # IPAexゴシックなどをダウンロードして使う（japanize_matplotlibの代わり）
     url = "https://moji.or.jp/wp-content/ipafont/IPAexfont/ipaexg00401.ttf"
     if not os.path.exists(font_filename):
         try:
@@ -45,15 +44,13 @@ def load_japanese_font():
     return None
 
 # ==========================================
-# 2. AI解析エンジン（タイムキーパー機能搭載）
+# 2. AI解析エンジン
 # ==========================================
 def get_safe_model_name():
-    # Colab版と同じく、使えるモデルを探すロジック
     try:
         models = list(genai.list_models())
         valid_models = [m.name for m in models if 'generateContent' in m.supported_generation_methods]
         
-        # 優先順位: 1.5-flash -> 1.5-pro -> others
         for m in valid_models:
             if "1.5-flash" in m: return m
         for m in valid_models:
@@ -61,7 +58,7 @@ def get_safe_model_name():
         
         return valid_models[0] if valid_models else "models/gemini-1.5-flash"
     except:
-        return "models/gemini-1.5-flash" # フォールバック
+        return "models/gemini-1.5-flash"
 
 def run_ai_analysis(image_obj):
     target_model = get_safe_model_name()
@@ -69,7 +66,6 @@ def run_ai_analysis(image_obj):
     try:
         model = genai.GenerativeModel(target_model)
         
-        # Colab版と同じプロンプト
         prompt = """
         あなたは陸上長距離のデータ分析官です。画像の「持久走記録用紙」を解析してください。
 
@@ -108,18 +104,14 @@ def run_ai_analysis(image_obj):
         )
         data = json.loads(response.text)
 
-        # ---------------------------------------------------------
-        # ★移植された「タイムキーパー機能（自動補正ロジック）」★
-        # ---------------------------------------------------------
+        # タイムキーパー機能（自動補正）
         max_elapsed_sec = 0
         for rec in data.get("records", []):
-            # ラップ合計
             laps = rec.get("laps", [])
             if laps:
                 total_lap_sec = sum(laps)
                 if total_lap_sec > max_elapsed_sec: max_elapsed_sec = total_lap_sec
             
-            # 文字列タイム解析
             if "total_time_str" in rec:
                 try:
                     t_parts = rec["total_time_str"].replace("分",":").replace("秒","").split(":")
@@ -127,13 +119,11 @@ def run_ai_analysis(image_obj):
                     if t_sec > max_elapsed_sec: max_elapsed_sec = t_sec
                 except: pass
         
-        # 補正1: 時間超過チェック (750秒 = 12分30秒超えなら15分走)
         if max_elapsed_sec > 750:
             if data.get("record_type_minutes") == 12:
                 st.toast(f"⏱️ 補正発動: {int(max_elapsed_sec//60)}分台のため『15分間走』に変更しました")
                 data["record_type_minutes"] = 15
         
-        # 補正2: 距離超過チェック (3200m超えなら15分走)
         dist_check = 0
         if data.get("records"):
             try:
@@ -150,13 +140,12 @@ def run_ai_analysis(image_obj):
         return None, f"解析エラー: {e}"
 
 # ==========================================
-# 3. レポート描画（Colab版のレイアウト再現）
+# 3. レポート描画
 # ==========================================
 def create_report_image(data):
     fp = load_japanese_font()
     font_prop = fp if fp else None
     
-    # Colab版のヘルパー関数
     def insert_newlines(text, length=30):
         return '\n'.join([line[i:i+length] for line in text.split('\n') for i in range(0, len(line), length)])
 
@@ -167,7 +156,7 @@ def create_report_image(data):
     base_min = int(data.get("record_type_minutes", 15))
     target_dist = 3000 if base_min == 15 else 2100
 
-    # --- ベスト記録特定 ---
+    # ベスト記録特定
     best_rec = {}
     best_l_dist = 0
     best_total_sec = 0
@@ -189,7 +178,7 @@ def create_report_image(data):
             best_l_dist = float(str(best_rec.get("total_dist", 0)).replace("m",""))
             best_total_sec = base_min * 60
 
-    # --- 計算 ---
+    # 計算
     if best_total_sec > 0 and best_l_dist > 0:
         pace_sec_per_km = best_total_sec / (best_l_dist / 1000)
     else:
@@ -220,7 +209,7 @@ def create_report_image(data):
     elif vo2_max >= 48: vo2_msg = f"VO2Max {vo2_max:.1f}。土台はできています。中盤の粘りを強化しましょう。"
     else: vo2_msg = f"VO2Max {vo2_max:.1f}。まずはペースを一定に保つ練習から始めましょう。"
 
-    # --- 描画 ---
+    # 描画
     fig = plt.figure(figsize=(11.69, 8.27), facecolor='white', dpi=150)
     
     title_mode = f"{target_dist}m走 (実戦)" if race_cat == "distance" else f"{base_min}分間走 (測定)"
@@ -289,7 +278,6 @@ def create_report_image(data):
                     if curr - prev >= AT_THRESHOLD:
                          cell.set_facecolor('#fadbd8'); cell.set_text_props(color='#c0392b', weight='bold')
             
-            # フォント適用
             if font_prop: cell.set_text_props(fontproperties=font_prop)
 
     # エリア3
@@ -325,7 +313,11 @@ def create_report_image(data):
     ax4.set_axis_off()
     ax4.add_patch(patches.Rectangle((0,0), 1, 1, facecolor='#fff9c4', edgecolor='#f1c40f', transform=ax4.transAxes))
     ax4.text(0.02, 0.88, "【④ COACH'S EYE / レース講評】", fontsize=13, color='#d35400', weight='bold', fontproperties=font_prop)
-    final_text = f"■ アドバイス\n{advice.replace('。', '。\n')}\n\n■ 生理学的評価\n{vo2_msg}"
+    
+    # ★修正箇所：f-string内でのバックスラッシュ禁止回避
+    formatted_advice = advice.replace('。', '。\n')
+    final_text = f"■ アドバイス\n{formatted_advice}\n\n■ 生理学的評価\n{vo2_msg}"
+    
     ax4.text(0.02, 0.82, insert_newlines(final_text, 30), fontsize=10, va='top', linespacing=1.5, fontproperties=font_prop)
 
     # 保存
