@@ -9,7 +9,7 @@ from PIL import Image, ImageOps
 import google.generativeai as genai
 
 # ==========================================
-# 1. システム設定 & フォント準備（鉄壁）
+# 1. システム設定 & フォント準備（Google Fonts採用）
 # ==========================================
 st.set_page_config(page_title="持久走データサイエンス", layout="wide")
 
@@ -23,16 +23,15 @@ if not API_KEY:
 
 genai.configure(api_key=API_KEY)
 
-# ★最重要：日本語フォントをダウンロードし、プロパティオブジェクトを作成
-# これを各描画関数に直接渡すことで、環境依存の文字化けを回避する
+# ★修正：絶対にブロックされないGoogle Fonts (GitHub) から取得
 @st.cache_resource
-def get_font_prop():
-    font_filename = "JP_Font.ttf"
-    # IPAexゴシック（安定した日本語フォント）
-    url = "https://moji.or.jp/wp-content/ipafont/IPAexfont/ipaexg00401.ttf"
+def load_japanese_font():
+    font_filename = "NotoSansJP-Regular.ttf"
+    # Google Fontsの安定したダウンロードリンク
+    url = "https://raw.githubusercontent.com/google/fonts/main/ofl/notosansjp/NotoSansJP-Regular.ttf"
     
-    # フォントファイルがない場合はダウンロード
-    if not os.path.exists(font_filename):
+    # フォントファイルがない、またはサイズがおかしい場合は再ダウンロード
+    if not os.path.exists(font_filename) or os.path.getsize(font_filename) < 1000:
         try:
             response = requests.get(url, timeout=20)
             if response.status_code == 200:
@@ -40,9 +39,12 @@ def get_font_prop():
                     f.write(response.content)
         except:
             pass
-            
+    
     # フォントプロパティを生成して返す
     if os.path.exists(font_filename):
+        # Matplotlibに登録
+        fm.fontManager.addfont(font_filename)
+        # プロパティ作成
         return fm.FontProperties(fname=font_filename)
     return None
 
@@ -53,8 +55,14 @@ def get_safe_model_name():
     try:
         models = list(genai.list_models())
         valid_models = [m.name for m in models if 'generateContent' in m.supported_generation_methods]
+        
+        # 1.5-flashを最優先
         for m in valid_models:
             if "1.5-flash" in m: return m
+        # なければ1.5-pro
+        for m in valid_models:
+            if "1.5-pro" in m: return m
+            
         return valid_models[0] if valid_models else "models/gemini-1.5-flash"
     except:
         return "models/gemini-1.5-flash"
@@ -98,14 +106,14 @@ def run_ai_analysis(image_obj):
         except:
             return None, "データの読み取りに失敗しました。"
 
-        # ★AttributeError対策：リストが返ってきた場合の強制型変換
+        # リストが返ってきた場合の強制型変換
         if isinstance(data, list):
             data = {
                 "records": data,
                 "name": "選手",
                 "record_type_minutes": 15,
                 "race_category": "time",
-                "coach_advice": "データ形式の自動補正を行いました。"
+                "coach_advice": "データ解析完了"
             }
 
         # タイムキーパー機能（自動補正）
@@ -152,12 +160,11 @@ def run_ai_analysis(image_obj):
         return None, f"解析エラー: {e}"
 
 # ==========================================
-# 3. レポート描画（フォント強制適用版）
+# 3. レポート描画（フォント適用・完成版）
 # ==========================================
 def create_report_image(data):
-    # ★重要：ここでフォントプロパティを取得
-    # 以降、全てのテキスト描画で fontproperties=fp を指定する
-    fp = get_font_prop()
+    # フォントプロパティ取得
+    fp = load_japanese_font()
     
     # 改行ヘルパー
     def insert_newlines(text, length=30):
@@ -236,7 +243,7 @@ def create_report_image(data):
     # 描画
     fig = plt.figure(figsize=(11.69, 8.27), facecolor='white', dpi=150)
     
-    # ★修正：タイトル等のテキストに必ず fontproperties=fp を渡す
+    # タイトル等にフォント適用
     title_mode = f"{target_dist}m走" if race_cat == "distance" else f"{base_min}分間走"
     fig.text(0.05, 0.96, "ATHLETE PERFORMANCE REPORT", fontsize=16, color='#7f8c8d', fontproperties=fp)
     fig.text(0.05, 0.91, f"{name} 選手 ｜ {title_mode} 能力分析", fontsize=26, color='#2c3e50', weight='bold', fontproperties=fp)
@@ -295,7 +302,7 @@ def create_report_image(data):
         table = ax2.table(cellText=cell_data, colLabels=cols, loc='center', cellLoc='center')
         table.auto_set_font_size(False); table.set_fontsize(9); table.scale(1, 1.25)
         
-        # ★修正：テーブル内のセルにも確実にフォント適用
+        # テーブルセルのフォント適用
         for (r, c), cell in table.get_celld().items():
             cell.set_text_props(fontproperties=fp)
             if r == 0: 
@@ -335,8 +342,6 @@ def create_report_image(data):
         
     table3 = ax3.table(cellText=rows3, colLabels=cols3, loc='upper center', cellLoc='center')
     table3.auto_set_font_size(False); table3.set_fontsize(10); table3.scale(1, 1.55)
-    
-    # ★修正：テーブル3にもフォント適用
     for (r, c), cell in table3.get_celld().items():
         cell.set_text_props(fontproperties=fp)
         if r == 0: 
@@ -350,9 +355,8 @@ def create_report_image(data):
     ax4.add_patch(patches.Rectangle((0,0), 1, 1, facecolor='#fff9c4', edgecolor='#f1c40f', transform=ax4.transAxes))
     ax4.text(0.02, 0.88, "【④ COACH'S EYE / レース講評】", fontsize=13, color='#d35400', weight='bold', fontproperties=fp)
     
-    # ★修正：SyntaxError対策。f-string内でバックスラッシュを使わず、事前に置換
-    formatted_advice = advice.replace('。', '。\n')
-    final_text_raw = f"■ アドバイス\n{formatted_advice}\n\n■ 生理学的評価\n{vo2_msg}"
+    clean_advice = advice.replace('。', '。\n')
+    final_text_raw = f"■ アドバイス\n{clean_advice}\n\n■ 生理学的評価\n{vo2_msg}"
     final_text_ready = insert_newlines(final_text_raw, 30)
     
     ax4.text(0.02, 0.82, final_text_ready, fontsize=10, va='top', linespacing=1.5, fontproperties=fp)
