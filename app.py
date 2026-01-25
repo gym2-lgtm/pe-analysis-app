@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import json
+import time
 from PIL import Image, ImageOps
 import google.generativeai as genai
 
@@ -13,7 +14,6 @@ st.set_page_config(page_title="持久走データサイエンス", layout="wide"
 # スタイリング（Web表示用CSS）
 st.markdown("""
     <style>
-    .big-font { font-size:24px !important; font-weight:bold; color:#2c3e50; }
     .metric-box { background-color:#f0f2f6; padding:15px; border-radius:10px; border-left: 5px solid #2980b9; }
     .advice-box { background-color:#fff9c4; padding:15px; border-radius:10px; border: 1px solid #f1c40f; }
     </style>
@@ -30,81 +30,104 @@ if not API_KEY:
 genai.configure(api_key=API_KEY)
 
 # ==========================================
-# 2. AI解析エンジン（モデル完全固定版）
+# 2. AI解析エンジン（総当たりサバイバルモード）
 # ==========================================
-def run_ai_analysis(image_obj):
-    # ★修正：自動検索を廃止し、安定版モデルを「名指し」で指定
-    # これにより "2.5-flash" (20回制限) が勝手に選ばれる事故を防ぐ
-    target_model = "models/gemini-1.5-flash"
+def run_ai_analysis_with_fallback(image_obj):
+    # 試行するモデルの優先順位リスト
+    # 1.5系がダメなら、旧世代の安定版(vision)まで降りていく
+    candidate_models = [
+        "gemini-1.5-flash",
+        "gemini-1.5-flash-latest",
+        "gemini-1.5-flash-001",
+        "gemini-1.5-pro",
+        "gemini-1.5-pro-latest",
+        "gemini-pro-vision"  # 最後の砦（旧安定版）
+    ]
 
-    try:
-        model = genai.GenerativeModel(target_model)
-        
-        prompt = """
-        あなたは陸上長距離のデータ分析官です。画像の「持久走記録用紙」を解析してください。
-        【JSON出力形式】
+    prompt = """
+    あなたは陸上長距離のデータ分析官です。画像の「持久走記録用紙」を解析してください。
+    【JSON出力形式】
+    {
+      "name": "選手名",
+      "record_type_minutes": 15,
+      "race_category": "time", 
+      "records": [
         {
-          "name": "選手名",
-          "record_type_minutes": 15,
-          "race_category": "time", 
-          "records": [
-            {
-              "attempt": 1, 
-              "total_dist": 4050, 
-              "total_time_str": "14:45",
-              "laps": [91, 87, 89...]
-            }
-          ],
-          "coach_advice": "アドバイステキスト"
+          "attempt": 1, 
+          "total_dist": 4050, 
+          "total_time_str": "14:45",
+          "laps": [91, 87, 89...]
         }
-        """
-        
-        response = model.generate_content([prompt, image_obj], generation_config={"response_mime_type": "application/json"})
-        
-        # データクリーニング
-        raw_text = response.text.replace("```json", "").replace("```", "").strip()
+      ],
+      "coach_advice": "アドバイステキスト"
+    }
+    """
+
+    last_error = ""
+    
+    # 総当たりループ開始
+    for model_name in candidate_models:
         try:
-            data = json.loads(raw_text)
-        except:
-            return None, "AIの応答を読み取れませんでした"
-
-        # データ型ガード
-        if isinstance(data, list):
-            data = {"records": data, "name": "選手", "record_type_minutes": 15, "race_category": "time", "coach_advice": ""}
-
-        # タイムキーパー（自動補正）
-        max_elapsed_sec = 0
-        records = data.get("records", [])
-        if not isinstance(records, list): 
-            records = []
-            data["records"] = []
-
-        for rec in records:
-            laps = rec.get("laps", [])
-            if laps:
-                val = sum(laps)
-                if val > max_elapsed_sec: max_elapsed_sec = val
-            if "total_time_str" in rec:
-                try:
-                    parts = str(rec["total_time_str"]).replace("分",":").replace("秒","").split(":")
-                    if len(parts)>=2:
-                        val = int(parts[0])*60 + int(parts[1])
-                        if val > max_elapsed_sec: max_elapsed_sec = val
-                except: pass
-        
-        # 12分30秒を超えていたら15分走に強制変更
-        if max_elapsed_sec > 750 and data.get("record_type_minutes") == 12:
-            st.toast(f"⏱️ 補正: {int(max_elapsed_sec//60)}分台のため『15分間走』に変更")
-            data["record_type_minutes"] = 15
+            # モデル設定
+            model = genai.GenerativeModel(model_name)
             
-        return data, None
-    except Exception as e:
-        return None, f"解析エラー: {e}"
+            # 生成実行
+            response = model.generate_content(
+                [prompt, image_obj], 
+                generation_config={"response_mime_type": "application/json"}
+            )
+            
+            # ここまで来たら成功とみなし、データを解析する
+            raw_text = response.text.replace("```json", "").replace("```", "").strip()
+            data = json.loads(raw_text)
+            
+            # データ型ガード
+            if isinstance(data, list):
+                data = {"records": data, "name": "選手", "record_type_minutes": 15, "race_category": "time", "coach_advice": ""}
+
+            # 成功メッセージ（デバッグ用・本番では消しても良いが安心のため表示）
+            st.toast(f"✅ 接続成功: {model_name}")
+            
+            # --- タイムキーパー自動補正 ---
+            max_elapsed_sec = 0
+            records = data.get("records", [])
+            if not isinstance(records, list): 
+                records = []
+                data["records"] = []
+
+            for rec in records:
+                laps = rec.get("laps", [])
+                if laps:
+                    val = sum(laps)
+                    if val > max_elapsed_sec: max_elapsed_sec = val
+                if "total_time_str" in rec:
+                    try:
+                        parts = str(rec["total_time_str"]).replace("分",":").replace("秒","").split(":")
+                        if len(parts)>=2:
+                            val = int(parts[0])*60 + int(parts[1])
+                            if val > max_elapsed_sec: max_elapsed_sec = val
+                    except: pass
+            
+            if max_elapsed_sec > 750 and data.get("record_type_minutes") == 12:
+                st.toast(f"⏱️ 補正: {int(max_elapsed_sec//60)}分台のため『15分間走』に変更")
+                data["record_type_minutes"] = 15
+                
+            return data, None # 成功したのでループを抜けてリターン
+
+        except Exception as e:
+            # 失敗したら次へ
+            last_error = str(e)
+            # 429(回数制限)の場合は少し待つ
+            if "429" in str(e):
+                time.sleep(1)
+            continue
+
+    # 全滅した場合
+    return None, f"全てのモデルで解析に失敗しました。最後の工ラー: {last_error}"
 
 # ==========================================
 # 3. ダッシュボード表示（Webネイティブ方式）
 # ==========================================
-# 画像生成(Matplotlib)をやめ、HTMLで表示することで文字化けを根絶
 def display_dashboard(data):
     name = data.get("name", "選手")
     records = data.get("records", [])
@@ -156,9 +179,6 @@ def display_dashboard(data):
         vo2_max = (d12 - 504.9)/44.73
         ref_sec = best_total_sec * (target_dist/best_l_dist)**1.06 if best_l_dist>0 else 0
 
-    rm, rs = divmod(ref_sec, 60)
-    # ref_str = f"{int(rm)}分{int(rs):02d}秒" (未使用のためコメントアウト)
-    
     pot_3k = (11000/vo2_max)*3.2 if vo2_max>0 else 0
     pm, ps = divmod(pot_3k, 60)
     vo2_msg = f"VO2Max {vo2_max:.1f}" if vo2_max>0 else "計測不能"
@@ -180,8 +200,6 @@ def display_dashboard(data):
     if records:
         rows = []
         max_len = max([len(r.get("laps",[])) for r in records]) if records else 0
-        
-        # カラム定義
         cols = ["周回"]
         for i, r in enumerate(records):
             cols.append(f"#{i+1} Lap")
@@ -194,7 +212,6 @@ def display_dashboard(data):
                 if i < len(laps):
                     sm, ss = divmod(sum(laps[:i+1]), 60)
                     lap_val = f"{laps[i]:.1f}"
-                    # AT判定(3秒落ち)
                     if i > 0 and i < len(laps) and (laps[i] - laps[i-1] >= 3.0):
                         lap_val = f"⚠️ {lap_val}"
                     
@@ -249,15 +266,14 @@ def display_dashboard(data):
 uploaded_file = st.file_uploader("記録用紙を撮影してアップロードしてください", type=['jpg', 'jpeg', 'png'])
 
 if uploaded_file:
-    # 画像を表示
     image = Image.open(uploaded_file)
     image = ImageOps.exif_transpose(image).convert('RGB')
     st.image(image, caption='アップロード画像', width=300)
     
-    with st.spinner("AI解析中..."):
-        data, err = run_ai_analysis(image)
+    with st.spinner("AIモデルを総当たりで検索中..."):
+        data, err = run_ai_analysis_with_fallback(image)
         if data:
             st.success("解析完了！")
             display_dashboard(data)
         else:
-            st.error(f"解析エラー: {err}")
+            st.error(f"システムエラー: {err}")
