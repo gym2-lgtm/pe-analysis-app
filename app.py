@@ -10,13 +10,12 @@ import google.generativeai as genai
 # ==========================================
 st.set_page_config(page_title="持久走データサイエンス", layout="wide")
 
-# スタイリング（見た目を整えるCSS）
+# スタイリング（Web表示用CSS）
 st.markdown("""
     <style>
     .big-font { font-size:24px !important; font-weight:bold; color:#2c3e50; }
     .metric-box { background-color:#f0f2f6; padding:15px; border-radius:10px; border-left: 5px solid #2980b9; }
     .advice-box { background-color:#fff9c4; padding:15px; border-radius:10px; border: 1px solid #f1c40f; }
-    .stTable { font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -31,22 +30,16 @@ if not API_KEY:
 genai.configure(api_key=API_KEY)
 
 # ==========================================
-# 2. AI解析エンジン
+# 2. AI解析エンジン（モデル完全固定版）
 # ==========================================
-def get_safe_model_name():
-    try:
-        models = list(genai.list_models())
-        valid_models = [m.name for m in models if 'generateContent' in m.supported_generation_methods]
-        for m in valid_models:
-            if "1.5-flash" in m: return m
-        return valid_models[0] if valid_models else "models/gemini-1.5-flash"
-    except:
-        return "models/gemini-1.5-flash"
-
 def run_ai_analysis(image_obj):
-    target_model = get_safe_model_name()
+    # ★修正：自動検索を廃止し、安定版モデルを「名指し」で指定
+    # これにより "2.5-flash" (20回制限) が勝手に選ばれる事故を防ぐ
+    target_model = "models/gemini-1.5-flash"
+
     try:
         model = genai.GenerativeModel(target_model)
+        
         prompt = """
         あなたは陸上長距離のデータ分析官です。画像の「持久走記録用紙」を解析してください。
         【JSON出力形式】
@@ -65,18 +58,21 @@ def run_ai_analysis(image_obj):
           "coach_advice": "アドバイステキスト"
         }
         """
+        
         response = model.generate_content([prompt, image_obj], generation_config={"response_mime_type": "application/json"})
         
+        # データクリーニング
         raw_text = response.text.replace("```json", "").replace("```", "").strip()
         try:
             data = json.loads(raw_text)
         except:
-            return None, "データ解析失敗"
+            return None, "AIの応答を読み取れませんでした"
 
+        # データ型ガード
         if isinstance(data, list):
             data = {"records": data, "name": "選手", "record_type_minutes": 15, "race_category": "time", "coach_advice": ""}
 
-        # 自動補正
+        # タイムキーパー（自動補正）
         max_elapsed_sec = 0
         records = data.get("records", [])
         if not isinstance(records, list): 
@@ -96,17 +92,19 @@ def run_ai_analysis(image_obj):
                         if val > max_elapsed_sec: max_elapsed_sec = val
                 except: pass
         
+        # 12分30秒を超えていたら15分走に強制変更
         if max_elapsed_sec > 750 and data.get("record_type_minutes") == 12:
             st.toast(f"⏱️ 補正: {int(max_elapsed_sec//60)}分台のため『15分間走』に変更")
             data["record_type_minutes"] = 15
             
         return data, None
     except Exception as e:
-        return None, f"エラー: {e}"
+        return None, f"解析エラー: {e}"
 
 # ==========================================
-# 3. ダッシュボード表示（画像生成をやめ、Web表示にする）
+# 3. ダッシュボード表示（Webネイティブ方式）
 # ==========================================
+# 画像生成(Matplotlib)をやめ、HTMLで表示することで文字化けを根絶
 def display_dashboard(data):
     name = data.get("name", "選手")
     records = data.get("records", [])
@@ -117,7 +115,7 @@ def display_dashboard(data):
     base_min = int(data.get("record_type_minutes", 15))
     target_dist = 3000 if base_min == 15 else 2100
 
-    # 計算ロジック
+    # ベスト記録特定
     best_rec = {}
     best_l_dist = 0
     best_total_sec = 0
@@ -143,6 +141,7 @@ def display_dashboard(data):
                 best_total_sec = base_min * 60
             except: pass
 
+    # 指標計算
     pace_sec = best_total_sec / (best_l_dist/1000) if best_l_dist>0 else 0
     avg_pace = f"{int(pace_sec//60)}'{int(pace_sec%60):02d}/km"
     
@@ -158,90 +157,81 @@ def display_dashboard(data):
         ref_sec = best_total_sec * (target_dist/best_l_dist)**1.06 if best_l_dist>0 else 0
 
     rm, rs = divmod(ref_sec, 60)
-    ref_str = f"{int(rm)}分{int(rs):02d}秒"
-    rp = ref_sec/(target_dist/1000) if target_dist>0 else 0
-    rp_str = f"{int(rp//60)}'{int(rp%60):02d}/km"
+    # ref_str = f"{int(rm)}分{int(rs):02d}秒" (未使用のためコメントアウト)
     
     pot_3k = (11000/vo2_max)*3.2 if vo2_max>0 else 0
     pm, ps = divmod(pot_3k, 60)
     vo2_msg = f"VO2Max {vo2_max:.1f}" if vo2_max>0 else "計測不能"
 
-    # --- 画面表示 (Streamlit Native) ---
+    # --- ダッシュボード構築 ---
     st.markdown(f"# 🏃‍♂️ {name} 選手｜能力分析レポート")
     
     # エリア1: スコアカード
     st.markdown("### ① 科学的ポテンシャル診断 (Best)")
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.markdown('<div class="metric-box">', unsafe_allow_html=True)
-        st.metric("自己ベスト距離", f"{int(best_l_dist)} m", f"{base_min}分間走")
-        st.markdown('</div>', unsafe_allow_html=True)
-        
-    with col2:
-        st.markdown('<div class="metric-box">', unsafe_allow_html=True)
-        st.metric("平均ペース", avg_pace, "1kmあたり")
-        st.markdown('</div>', unsafe_allow_html=True)
-        
-    with col3:
-        st.markdown('<div class="metric-box">', unsafe_allow_html=True)
-        st.metric("エンジン性能 (VO2Max)", f"{vo2_max:.1f}", "ml/kg/min")
-        st.markdown('</div>', unsafe_allow_html=True)
+    c1, c2, c3 = st.columns(3)
+    c1.markdown(f"""<div class="metric-box"><h4>自己ベスト距離</h4><h2>{int(best_l_dist)} m</h2><small>({base_min}分間走)</small></div>""", unsafe_allow_html=True)
+    c2.markdown(f"""<div class="metric-box"><h4>平均ペース</h4><h2>{avg_pace}</h2><small>(1kmあたり)</small></div>""", unsafe_allow_html=True)
+    c3.markdown(f"""<div class="metric-box"><h4>エンジン性能(VO2Max)</h4><h2>{vo2_max:.1f}</h2><small>ml/kg/min</small></div>""", unsafe_allow_html=True)
 
-    st.markdown("---")
+    st.divider()
 
     # エリア2: ラップ表
     st.markdown("### ② ラップ推移 & AT閾値判定")
     if records:
-        df_data = []
+        rows = []
         max_len = max([len(r.get("laps",[])) for r in records]) if records else 0
         
-        # ヘッダー作成
+        # カラム定義
         cols = ["周回"]
         for i, r in enumerate(records):
-            cols.append(f"#{i+1} ラップ")
-            cols.append(f"#{i+1} スプリット")
+            cols.append(f"#{i+1} Lap")
+            cols.append(f"#{i+1} Split")
             
         for i in range(max_len):
-            row = [f"{i+1}周"]
+            row_data = [f"{i+1}周"]
             for rec in records:
                 laps = rec.get("laps", [])
                 if i < len(laps):
                     sm, ss = divmod(sum(laps[:i+1]), 60)
-                    # AT判定 (3秒落ち)
-                    val = f"{laps[i]:.1f}"
+                    lap_val = f"{laps[i]:.1f}"
+                    # AT判定(3秒落ち)
                     if i > 0 and i < len(laps) and (laps[i] - laps[i-1] >= 3.0):
-                        val = f"⚠️ {val}" # 文字で警告
-                    row.append(val)
-                    row.append(f"{int(sm)}:{int(ss):02d}")
+                        lap_val = f"⚠️ {lap_val}"
+                    
+                    row_data.append(lap_val)
+                    row_data.append(f"{int(sm)}:{int(ss):02d}")
                 else:
-                    row.extend(["-", "-"])
-            df_data.append(row)
+                    row_data.extend(["-", "-"])
+            rows.append(row_data)
             
-        df = pd.DataFrame(df_data, columns=cols)
+        df = pd.DataFrame(rows, columns=cols)
         st.dataframe(df, use_container_width=True)
     else:
         st.info("ラップデータがありません")
 
-    col_L, col_R = st.columns([1, 1])
+    st.divider()
+
+    c_left, c_right = st.columns([1, 1])
     
-    with col_L:
+    # エリア3: ペース表
+    with c_left:
         st.markdown(f"### ③ {target_dist}m 目標ペース表")
         levels = [("維持", 1.05), ("PB更新", 1.00), ("限界突破", 0.94)]
-        p_data = []
+        p_rows = []
         lap_len = 300
         total_laps = int(target_dist/lap_len)
         
         for i in range(1, total_laps+1):
-            row = {"距離": f"{i*lap_len}m"}
-            for label, fac in levels:
+            r = {"距離": f"{i*lap_len}m"}
+            for lbl, fac in levels:
                 t = ref_sec * fac * (i/total_laps)
-                pm, ps = divmod(t, 60)
-                row[label] = f"{int(pm)}:{int(ps):02d}"
-            p_data.append(row)
-        st.dataframe(pd.DataFrame(p_data), use_container_width=True)
+                pm_t, ps_t = divmod(t, 60)
+                r[lbl] = f"{int(pm_t)}:{int(ps_t):02d}"
+            p_rows.append(r)
+        st.dataframe(pd.DataFrame(p_rows), use_container_width=True)
 
-    with col_R:
+    # エリア4: アドバイス
+    with c_right:
         st.markdown("### ④ AIコーチのアドバイス")
         st.markdown(f"""
         <div class="advice-box">
@@ -264,10 +254,10 @@ if uploaded_file:
     image = ImageOps.exif_transpose(image).convert('RGB')
     st.image(image, caption='アップロード画像', width=300)
     
-    with st.spinner("AIが記録を解析中..."):
+    with st.spinner("AI解析中..."):
         data, err = run_ai_analysis(image)
         if data:
-            st.success("解析完了！レポートを表示します")
+            st.success("解析完了！")
             display_dashboard(data)
         else:
             st.error(f"解析エラー: {err}")
