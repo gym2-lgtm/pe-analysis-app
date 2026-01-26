@@ -9,7 +9,6 @@ import json
 # ==========================================
 st.set_page_config(page_title="持久走データサイエンス", layout="wide")
 
-# CSS設定
 st.markdown("""
     <style>
     .metric-box { background-color:#f0f2f6; padding:15px; border-radius:10px; border-left: 5px solid #2980b9; }
@@ -28,44 +27,12 @@ if not API_KEY:
 genai.configure(api_key=API_KEY)
 
 # ==========================================
-# 2. モデル自動選択ロジック（エラー回避）
-# ==========================================
-def get_best_model():
-    """
-    APIから利用可能なモデル一覧を取得し、確実に存在するモデル名を返す。
-    """
-    try:
-        # 実際に使えるモデルリストを取得
-        models = [m.name for m in genai.list_models()]
-        
-        # 使いたいモデルの優先順位
-        priority = [
-            "models/gemini-1.5-flash",
-            "models/gemini-1.5-pro",
-            "models/gemini-pro-vision"
-        ]
-        
-        # リストにあるものを採用
-        for p in priority:
-            if p in models:
-                return p
-        
-        # なければ 'generateContent' が使える最初のモデルを強制採用
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                return m.name
-                
-    except Exception:
-        # 万が一の時はデフォルト
-        return "models/gemini-1.5-flash"
-
-    return "models/gemini-1.5-flash"
-
-# ==========================================
-# 3. 解析実行ロジック
+# 2. 解析実行ロジック（1.5-flash 完全固定）
 # ==========================================
 def run_analysis(image):
-    target_model = get_best_model()
+    # ★ここです。自動検索をやめ、1.5-flashを決め打ちします。
+    # Rebootさえすれば、このモデルは必ず認識されます。
+    target_model = "models/gemini-1.5-flash"
     model = genai.GenerativeModel(target_model)
     
     prompt = """
@@ -105,10 +72,10 @@ def run_analysis(image):
             
         return data, None
     except Exception as e:
-        return None, f"エラー({target_model}): {str(e)}"
+        return None, f"エラー: {str(e)} (Rebootしましたか？)"
 
 # ==========================================
-# 4. メイン画面
+# 3. メイン画面
 # ==========================================
 uploaded_file = st.file_uploader("記録用紙を撮影してアップロードしてください", type=['jpg', 'jpeg', 'png'])
 
@@ -122,7 +89,7 @@ if uploaded_file:
         
         if err:
             st.error(f"解析エラー: {err}")
-            st.info("※ requirements.txt に 'google-generativeai>=0.7.0' が含まれているか確認してください。")
+            st.info("対処法: 右下の 'Manage app' > 'Reboot App' を押して、数秒待ってから再試行してください。")
         elif data:
             st.success("解析完了")
             
