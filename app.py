@@ -55,33 +55,28 @@ def empty_result():
     }
 
 # ==========================================
-# 4. 画像を低コスト化してbase64化
-#    ★ 0.1円以下狙いの核心
+# 4. 画像を低コスト化して base64（JPEG）へ
 # ==========================================
 def optimize_image_for_cost(image: Image.Image, max_width: int = 768) -> Image.Image:
-    """
-    画像を軽量化しつつ、手書き文字が読めるラインを維持する調整
-    """
-    # まず向きを正す
     image = ImageOps.exif_transpose(image).convert("RGB")
 
-    # 横幅基準で縮小
     w, h = image.size
     if w > max_width:
         new_h = int(h * (max_width / w))
         image = image.resize((max_width, new_h))
 
-    # 文字が薄いケース対策（やりすぎるとノイズ増）
-    # 少しだけコントラストを上げる
     enhancer = ImageEnhance.Contrast(image)
     image = enhancer.enhance(1.15)
-
     return image
 
 def image_to_jpeg_base64(image: Image.Image, jpeg_quality: int = 65) -> str:
     buf = BytesIO()
     image.save(buf, format="JPEG", quality=jpeg_quality, optimize=True)
     return base64.b64encode(buf.getvalue()).decode("utf-8")
+
+def base64_to_data_url_jpeg(image_b64: str) -> str:
+    # ★ここが今回の修正ポイント：image_url に data URL を渡す
+    return f"data:image/jpeg;base64,{image_b64}"
 
 # ==========================================
 # 5. 解析ロジック（低コスト・安定）
@@ -122,9 +117,9 @@ def run_analysis(image: Image.Image):
 - coach_advice は短く具体的に（2〜3文）
 """
 
-    # 画像を軽量化して送る（コスト削減）
     optimized = optimize_image_for_cost(image, max_width=768)
     image_b64 = image_to_jpeg_base64(optimized, jpeg_quality=65)
+    image_data_url = base64_to_data_url_jpeg(image_b64)
 
     try:
         response = client.responses.create(
@@ -133,10 +128,10 @@ def run_analysis(image: Image.Image):
                 "role": "user",
                 "content": [
                     {"type": "input_text", "text": prompt},
-                    {"type": "input_image", "image_base64": image_b64},
+                    # ★ image_base64 ではなく image_url（data URL）を使う
+                    {"type": "input_image", "image_url": image_data_url},
                 ]
             }],
-            # ★古いopenai環境でも動くように response_format は使わない
             temperature=0.2,
         )
 
@@ -166,7 +161,6 @@ if uploaded_file:
     raw_img = ImageOps.exif_transpose(raw_img).convert("RGB")
     st.image(raw_img, caption="アップロード画像（元）", width=320)
 
-    # 軽量化後プレビュー
     optimized_preview = optimize_image_for_cost(raw_img, max_width=768)
     st.image(optimized_preview, caption="送信する画像（軽量化後）", width=320)
 
@@ -184,7 +178,6 @@ if uploaded_file:
 
     st.markdown(f"# 🏃‍♂️ {name} 選手｜能力分析レポート")
 
-    # ラップ表
     st.markdown("### 📊 ラップ・スプリット表")
     if records:
         rec = records[0]
@@ -203,7 +196,6 @@ if uploaded_file:
         st.table(pd.DataFrame(rows))
         st.metric("総距離", f"{rec.get('total_dist', 0)} m")
 
-    # アドバイス
     st.markdown("### 👟 AIコーチのアドバイス")
     st.markdown(f"""
     <div class="advice-box">
