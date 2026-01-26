@@ -136,11 +136,11 @@ def run_analysis(image: Image.Image):
                     {"type": "input_image", "image_base64": image_b64},
                 ]
             }],
-            response_format={"type": "json_object"},
+            # ★古いopenai環境でも動くように response_format は使わない
             temperature=0.2,
         )
 
-        text = response.output_text
+        text = response.output_text.strip()
         data = safe_json_load(text)
         if data is None:
             return empty_result(), "JSON解析に失敗しました"
