@@ -27,11 +27,10 @@ if not API_KEY:
 genai.configure(api_key=API_KEY)
 
 # ==========================================
-# 2. 解析実行ロジック（1.5-flash 完全固定）
+# 2. 解析実行ロジック（1.5-flash 固定）
 # ==========================================
 def run_analysis(image):
-    # ★ここです。自動検索をやめ、1.5-flashを決め打ちします。
-    # Rebootさえすれば、このモデルは必ず認識されます。
+    # 最新版ライブラリが入ったので、堂々と1.5-flashを指定します
     target_model = "models/gemini-1.5-flash"
     model = genai.GenerativeModel(target_model)
     
@@ -72,7 +71,7 @@ def run_analysis(image):
             
         return data, None
     except Exception as e:
-        return None, f"エラー: {str(e)} (Rebootしましたか？)"
+        return None, f"エラー: {str(e)}"
 
 # ==========================================
 # 3. メイン画面
@@ -89,7 +88,6 @@ if uploaded_file:
         
         if err:
             st.error(f"解析エラー: {err}")
-            st.info("対処法: 右下の 'Manage app' > 'Reboot App' を押して、数秒待ってから再試行してください。")
         elif data:
             st.success("解析完了")
             
