@@ -1,8 +1,10 @@
 import streamlit as st
 import pandas as pd
-import google.generativeai as genai
-from PIL import Image, ImageOps
 import json
+import base64
+from io import BytesIO
+from PIL import Image, ImageOps, ImageEnhance
+from openai import OpenAI
 
 # ==========================================
 # 1. システム設定
@@ -13,20 +15,19 @@ st.markdown("""
 <style>
 .metric-box { background-color:#f0f2f6; padding:15px; border-radius:10px; border-left: 5px solid #2980b9; }
 .advice-box { background-color:#fff9c4; padding:15px; border-radius:10px; border: 1px solid #f1c40f; }
+.small-note { color: #666; font-size: 0.9rem; }
 </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. APIキー設定
+# 2. APIキー設定（OpenAI）
 # ==========================================
-raw_key = st.secrets.get("GEMINI_API_KEY", "")
-API_KEY = str(raw_key).replace("\n", "").replace(" ", "").replace("　", "").replace('"', "").replace("'", "").strip()
-
+API_KEY = st.secrets.get("OPENAI_API_KEY", "")
 if not API_KEY:
-    st.error("SecretsにAPIキーが設定されていません。")
+    st.error("Secretsに OPENAI_API_KEY が設定されていません。")
     st.stop()
 
-genai.configure(api_key=API_KEY)
+client = OpenAI(api_key=API_KEY)
 
 # ==========================================
 # 3. JSON安全処理
@@ -50,16 +51,42 @@ def empty_result():
         "record_type_minutes": 15,
         "race_category": "time",
         "records": [],
-        "coach_advice": "今回は記録を正確に読み取ることができませんでしたが、挑戦したこと自体が素晴らしいです。次回は用紙全体がはっきり写るように撮影してみましょう。"
+        "coach_advice": "今回は記録を正確に読み取れませんでした。用紙全体が明るく写るように撮影して再挑戦しましょう。"
     }
 
 # ==========================================
-# 4. 解析ロジック（v1beta確定対応）
+# 4. 画像を低コスト化してbase64化
+#    ★ 0.1円以下狙いの核心
 # ==========================================
-def run_analysis(image):
-    # v1betaで画像対応・確実に存在するモデル
-    model = genai.GenerativeModel("gemini-1.0-pro-vision")
+def optimize_image_for_cost(image: Image.Image, max_width: int = 768) -> Image.Image:
+    """
+    画像を軽量化しつつ、手書き文字が読めるラインを維持する調整
+    """
+    # まず向きを正す
+    image = ImageOps.exif_transpose(image).convert("RGB")
 
+    # 横幅基準で縮小
+    w, h = image.size
+    if w > max_width:
+        new_h = int(h * (max_width / w))
+        image = image.resize((max_width, new_h))
+
+    # 文字が薄いケース対策（やりすぎるとノイズ増）
+    # 少しだけコントラストを上げる
+    enhancer = ImageEnhance.Contrast(image)
+    image = enhancer.enhance(1.15)
+
+    return image
+
+def image_to_jpeg_base64(image: Image.Image, jpeg_quality: int = 65) -> str:
+    buf = BytesIO()
+    image.save(buf, format="JPEG", quality=jpeg_quality, optimize=True)
+    return base64.b64encode(buf.getvalue()).decode("utf-8")
+
+# ==========================================
+# 5. 解析ロジック（低コスト・安定）
+# ==========================================
+def run_analysis(image: Image.Image):
     prompt = """
 あなたは陸上長距離のデータ分析官です。
 以下の指示は【絶対に】守ってください。
@@ -70,44 +97,51 @@ def run_analysis(image):
 - ``` や ```json は使用禁止
 - JSONの外に1文字でも出力したら失敗です
 
-【JSONスキーマ】
+【JSON形式】
 {
-  "name": "string",
-  "record_type_minutes": number,
+  "name": "選手名",
+  "record_type_minutes": 15,
   "race_category": "time",
   "records": [
     {
-      "attempt": number,
-      "total_dist": number,
-      "total_time_str": "mm:ss",
-      "laps": [number]
+      "attempt": 1,
+      "total_dist": 4050,
+      "total_time_str": "14:45",
+      "laps": [91, 87, 89]
     }
   ],
-  "coach_advice": "string"
+  "coach_advice": "短い励まし（2〜3文）"
 }
 
-【内容ルール】
-- ラップタイムは全て抽出
-- 数値は半角
-- laps は秒単位
-- 読み取れない項目は推測せず 0 または空配列
-- coach_advice は前向きで励ます内容
-
-【失敗時】
-- 解析不能でも必ず上記形式のJSONを出力
+【読み取りルール】
+- 「①②③」など複数回の記録があれば records に複数入れる
+- laps は各周のラップ秒（できるだけ抽出）
+- total_dist は合計(m)
+- total_time_str は最終の合計タイム（書かれていれば）
+- 不明な項目は推測せず 0 / 空配列
+- coach_advice は短く具体的に（2〜3文）
 """
 
+    # 画像を軽量化して送る（コスト削減）
+    optimized = optimize_image_for_cost(image, max_width=768)
+    image_b64 = image_to_jpeg_base64(optimized, jpeg_quality=65)
+
     try:
-        response = model.generate_content(
-            [prompt, image],
-            generation_config={
-                "response_mime_type": "application/json",
-                "temperature": 0.2
-            }
+        response = client.responses.create(
+            model="gpt-4.1-mini",
+            input=[{
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": prompt},
+                    {"type": "input_image", "image_base64": image_b64},
+                ]
+            }],
+            response_format={"type": "json_object"},
+            temperature=0.2,
         )
 
-        data = safe_json_load(response.text)
-
+        text = response.output_text
+        data = safe_json_load(text)
         if data is None:
             return empty_result(), "JSON解析に失敗しました"
 
@@ -117,20 +151,27 @@ def run_analysis(image):
         return empty_result(), f"解析エラー: {str(e)}"
 
 # ==========================================
-# 5. メイン画面
+# 6. メイン画面
 # ==========================================
+st.markdown("## 🏃 持久走データサイエンス（低コスト版）")
+st.markdown('<div class="small-note">画像は自動で軽量化して送信します（0.1円以下狙い）</div>', unsafe_allow_html=True)
+
 uploaded_file = st.file_uploader(
     "記録用紙を撮影してアップロードしてください",
     type=["jpg", "jpeg", "png"]
 )
 
 if uploaded_file:
-    image = Image.open(uploaded_file)
-    image = ImageOps.exif_transpose(image).convert("RGB")
-    st.image(image, caption="アップロード画像", width=300)
+    raw_img = Image.open(uploaded_file)
+    raw_img = ImageOps.exif_transpose(raw_img).convert("RGB")
+    st.image(raw_img, caption="アップロード画像（元）", width=320)
+
+    # 軽量化後プレビュー
+    optimized_preview = optimize_image_for_cost(raw_img, max_width=768)
+    st.image(optimized_preview, caption="送信する画像（軽量化後）", width=320)
 
     with st.spinner("AI解析中..."):
-        data, err = run_analysis(image)
+        data, err = run_analysis(raw_img)
 
     if err:
         st.warning(err)
